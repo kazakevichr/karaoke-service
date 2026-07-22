@@ -159,10 +159,12 @@
 <!-- ============ ИГРА ============ -->
 <div class="view on" id="vGrid">
   <div class="top">
-    <div class="fld"><label class="f">Коллекция</label><select id="gCollection"></select></div>
+    <div class="fld"><label class="f">Раунды</label><div id="roundTabs" style="display:flex;gap:6px"></div></div>
+    <div class="fld"><label class="f">Категория раунда</label><select id="rCategory" style="width:180px"></select></div>
     <div class="fld"><label class="f">Чисел</label>
-      <select id="gSize"><option>20</option><option>30</option><option>40</option><option>50</option><option selected>60</option></select>
+      <select id="rSize"><option>20</option><option>30</option><option>40</option><option>50</option><option selected>60</option></select>
     </div>
+    <button class="sec" id="btnStartRound">Разыграть раунд</button>
     <button class="sec" id="btnRandom">Случайное число</button>
     <button class="gh" id="btnUndo">Сбросить последнюю</button>
     <button class="gh" id="btnResetPlayed">Сбросить все</button>
@@ -205,6 +207,8 @@
     <button id="btnNewTrack">+ Новый трек</button>
     <button class="sec" id="btnBatch">Массовая загрузка</button>
     <div class="fld"><label class="f">Поиск</label><input type="text" id="libSearch" placeholder="название или исполнитель" style="width:240px"></div>
+    <div class="fld"><label class="f">Категория</label><select id="libCatFilter" style="width:160px"></select></div>
+    <button class="sec" id="btnLibAlpha">А-Я</button>
     <div class="sp"></div>
     <span class="status" id="lStatus"></span>
     <button class="sec" id="btnToGrid">К игре</button>
@@ -258,12 +262,11 @@
       <div class="row" id="youtubeResults" style="display:none"></div>
       <div class="row">
         <div class="fld full">
-          <label class="f">Коллекции трека</label>
-          <div id="eCollections" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px"></div>
+          <label class="f">Категории трека (темы — 90-е, саундтреки и т.д. Используются, когда для раунда случайно раздаются треки нужной темы)</label>
+          <div id="eCategories" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px"></div>
           <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-            <div class="fld"><label class="f">Коллекция</label><select id="eAddCollSelect" style="width:180px"></select></div>
-            <div class="fld"><label class="f">Номер</label><input type="number" id="eAddCollNumber" min="1" style="width:90px"></div>
-            <button class="sec" id="btnAddToColl" type="button">Добавить в коллекцию</button>
+            <div class="fld"><label class="f">Новая категория</label><input type="text" id="eNewCategory" placeholder="например: 90-е" style="width:200px"></div>
+            <button class="sec" id="btnAddCategory" type="button">Добавить категорию</button>
           </div>
         </div>
       </div>
@@ -356,12 +359,17 @@ async function dbPut(o){const d=await idb();return new Promise((res,rej)=>{const
 async function dbDel(id){const d=await idb();return new Promise((res,rej)=>{const t=d.transaction(STORE,'readwrite');
   t.objectStore(STORE).delete(id); t.oncomplete=()=>res(); t.onerror=()=>rej(t.error);});}
 
-/* ========== Настройки и коллекции ==========
-   collections: { "Хиты 90-х": { "7": trackId, "23": trackId } }
-   один и тот же trackId может стоять в любом числе любой коллекции  */
+/* ========== Настройки: раунды и категории ==========
+   Игра = 3 раунда (settings.rounds[0..2]). У каждого раунда своя тематика
+   (категория) и своя случайная расстановка треков по числам — так раунды
+   можно проходить параллельно, переключаясь между ними в любой момент.
+   Категория — это просто тег на треке (settings.categories: ['Общая','90-е',...]),
+   трек может носить сразу несколько тегов. При старте раунда сервис случайно
+   берёт N треков из пула нужной категории и раскладывает их по числам. */
 const SET='karaoke_settings_v2';
+function freshRound(){ return { category:'', size:30, map:{}, played:{}, history:[] }; }
 const settings = Object.assign(
-  { collection:'Общая', size:60, played:{}, history:{}, collections:{ 'Общая':{} } },
+  { categories:['Общая'], activeRound:0 },
   JSON.parse(localStorage.getItem(SET)||'{}'));
 const saveSettings = () => localStorage.setItem(SET, JSON.stringify(settings));
 
@@ -381,25 +389,61 @@ const say = (el,t,err) => { const e=$(el); e.innerHTML=t; e.className='status'+(
 const trackById = id => bank.find(t=>t.id===id);
 const show = v => ['vGrid','vPlay','vLib'].forEach(x=>$(x).classList.toggle('on', x===v));
 
-function coll(name){ name=name||settings.collection;
-  settings.collections[name]=settings.collections[name]||{}; return settings.collections[name]; }
-function collNames(){ const s=new Set(Object.keys(settings.collections)); s.add('Общая'); return [...s].sort(); }
-function fillCollSelect(){
-  const el=$('gCollection'); el.innerHTML='';
-  collNames().forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; el.appendChild(o); });
-  const extra=document.createElement('option'); extra.value='__new'; extra.textContent='+ Новая коллекция...'; el.appendChild(extra);
-  el.value=settings.collection;
+function activeRound(){ return settings.rounds[settings.activeRound]; }
+function tracksInCategory(cat){
+  if(!cat) return [];
+  return bank.filter(t=>(t.categories&&t.categories.length?t.categories:['Общая']).includes(cat));
+}
+function roundsContaining(trackId){
+  const res=[];
+  settings.rounds.forEach((r,ri)=>{ Object.keys(r.map||{}).forEach(n=>{ if(r.map[n]===trackId) res.push(`Раунд ${ri+1} №${n}`); }); });
+  return res;
+}
+function removeFromAllRounds(trackId){
+  settings.rounds.forEach(r=>{ Object.keys(r.map||{}).forEach(n=>{ if(r.map[n]===trackId) delete r.map[n]; }); });
+}
+function fillCategorySelect(el, withNew){
+  const cur=el.value;
+  el.innerHTML='';
+  settings.categories.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; el.appendChild(o); });
+  if(withNew){ const extra=document.createElement('option'); extra.value='__new'; extra.textContent='+ Новая категория...'; el.appendChild(extra); }
+  if(cur && [...el.options].some(o=>o.value===cur)) el.value=cur;
+}
+function fillLibCatFilter(){
+  const el=$('libCatFilter'); const cur=el.value;
+  el.innerHTML='<option value="">Все категории</option>';
+  settings.categories.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; el.appendChild(o); });
+  el.value=[...el.options].some(o=>o.value===cur)?cur:'';
+}
+function renderRoundTabs(){
+  const box=$('roundTabs'); box.innerHTML='';
+  settings.rounds.forEach((r,i)=>{
+    const cnt=Object.values(r.map||{}).filter(Boolean).length;
+    const b=document.createElement('button'); b.type='button';
+    b.className='sec'+(i===settings.activeRound?' on':'');
+    b.style.cssText='display:flex;flex-direction:column;align-items:center;line-height:1.3;padding:8px 14px';
+    b.innerHTML=`<span>Раунд ${i+1}</span><span style="font-size:11px;opacity:.75">${r.category?r.category+' · '+cnt:'не задан'}</span>`;
+    b.onclick=()=>{ settings.activeRound=i; saveSettings(); syncRoundControls(); renderRoundTabs(); renderGrid(); };
+    box.appendChild(b);
+  });
+}
+function syncRoundControls(){
+  const r=activeRound();
+  fillCategorySelect($('rCategory'), true);
+  if(r.category) $('rCategory').value=r.category;
+  $('rSize').value=r.size||30;
 }
 
 /* ========== СЕТКА ========== */
 function renderGrid(){
-  const size=+settings.size;
+  const r=activeRound();
+  const size=+r.size||30;
   const cols = size<=20?5 : size<=30?6 : size<=40?8 : 10;
   const wrap=$('gridWrap');
   wrap.style.gridTemplateColumns=`repeat(${cols},1fr)`;
   wrap.style.gridTemplateRows=`repeat(${Math.ceil(size/cols)},1fr)`;
   wrap.innerHTML='';
-  const map=coll(), played=settings.played[settings.collection]||{};
+  const map=r.map||{}, played=r.played||{};
   for(let i=1;i<=size;i++){
     const tid=map[i], t=tid?trackById(tid):null;
     const d=document.createElement('div');
@@ -418,17 +462,33 @@ function renderGrid(){
     wrap.appendChild(d);
   }
   const cnt=Object.values(map).filter(Boolean).length;
-  say('gStatus', `${cnt} треков расставлено • ${bank.length} в банке`);
+  say('gStatus', `Раунд ${settings.activeRound+1}${r.category?' · '+r.category:''}: ${cnt} из ${size} расставлено • ${bank.length} в банке`);
 }
-$('gCollection').onchange = e => {
-  if(e.target.value==='__new'){
-    const n=prompt('Название коллекции (например: Хиты 90-х)');
-    if(n){ settings.collections[n]=settings.collections[n]||{}; settings.collection=n; saveSettings(); }
-    fillCollSelect(); renderGrid(); return;
+$('rCategory').onchange=()=>{
+  if($('rCategory').value==='__new'){
+    const n=prompt('Название новой категории (например: 90-е, Саундтреки)');
+    if(n && !settings.categories.includes(n)){ settings.categories.push(n); settings.categories.sort(); saveSettings(); }
+    fillCategorySelect($('rCategory'), true);
+    $('rCategory').value = n || activeRound().category || settings.categories[0];
   }
-  settings.collection=e.target.value; saveSettings(); renderGrid();
 };
-$('gSize').onchange = e => { settings.size=+e.target.value; saveSettings(); renderGrid(); };
+$('btnStartRound').onclick=()=>{
+  const cat=$('rCategory').value, size=+$('rSize').value;
+  if(!cat||cat==='__new') return say('gStatus','Выберите категорию раунда', true);
+  const pool=tracksInCategory(cat);
+  if(!pool.length) return say('gStatus', `В категории «${cat}» нет треков — сначала добавьте их в банке`, true);
+  const r=activeRound();
+  const hasProgress = Object.keys(r.played||{}).length>0 || Object.keys(r.map||{}).length>0;
+  if(hasProgress && !confirm(`Раунд ${settings.activeRound+1} будет пересоздан заново — текущая расстановка и отметки сыгранного сотрутся. Продолжить?`)) return;
+  const n=Math.min(size, pool.length);
+  const shuffled=[...pool].sort(()=>Math.random()-.5).slice(0,n);
+  const map={}; shuffled.forEach((t,idx)=>{ map[idx+1]=t.id; });
+  r.category=cat; r.size=n; r.map=map; r.played={}; r.history=[];
+  saveSettings(); renderRoundTabs(); renderGrid();
+  say('gStatus', n<size
+    ? `Раунд ${settings.activeRound+1}: в категории «${cat}» нашлось только ${n} треков — раунд сокращён`
+    : `Раунд ${settings.activeRound+1}: ${n} треков из категории «${cat}» расставлено случайно`);
+};
 $('btnAssign').onclick = () => {
   assignMode=!assignMode;
   document.body.classList.toggle('assign', assignMode);
@@ -438,28 +498,28 @@ $('btnAssign').onclick = () => {
   renderGrid();
 };
 $('btnResetPlayed').onclick = () => {
-  settings.played[settings.collection]={}; settings.history[settings.collection]=[];
+  const r=activeRound(); r.played={}; r.history=[];
   saveSettings(); renderGrid();
 };
 $('btnUndo').onclick = () => {
-  const h=settings.history[settings.collection]||[];
+  const r=activeRound(); const h=r.history||[];
   if(!h.length) return say('gStatus','Нечего отменять', true);
   const n=h.pop();
-  if(settings.played[settings.collection]) delete settings.played[settings.collection][n];
+  if(r.played) delete r.played[n];
   saveSettings(); renderGrid(); say('gStatus',`Отметка с числа ${n} снята`);
 };
 $('btnRandom').onclick = () => {
-  const map=coll(), played=settings.played[settings.collection]||{};
+  const r=activeRound(); const map=r.map||{}, played=r.played||{};
   const avail=Object.keys(map).filter(n=>map[n]&&!played[n]);
-  if(!avail.length) return say('gStatus','Все треки коллекции уже сыграны', true);
+  if(!avail.length) return say('gStatus','Все треки раунда уже сыграны', true);
   const n=avail[Math.floor(Math.random()*avail.length)];
   [...$('gridWrap').children].forEach(c=>c.classList.remove('last'));
   const el=$('gridWrap').children[n-1];
   if(el){ el.classList.add('last'); el.scrollIntoView({block:'center'}); }
   say('gStatus',`Выпало число ${n}`);
 };
-$('btnToLib').onclick = () => { show('vLib'); ensureEditing(); renderLib(); };
-$('btnToGrid').onclick = () => { show('vGrid'); fillCollSelect(); renderGrid(); };
+$('btnToLib').onclick = () => { show('vLib'); ensureEditing(); fillLibCatFilter(); renderLib(); };
+$('btnToGrid').onclick = () => { show('vGrid'); syncRoundControls(); renderRoundTabs(); renderGrid(); };
 function toggleFull(){ if(!document.fullscreenElement) document.documentElement.requestFullscreen(); else document.exitFullscreen(); }
 $('btnFullG').onclick=toggleFull; $('btnFullP').onclick=toggleFull;
 
@@ -475,16 +535,16 @@ function renderPick(){
   const list=bank.filter(t=>!q || (t.title||'').toLowerCase().includes(q) || (t.artist||'').toLowerCase().includes(q));
   if(!list.length) box.innerHTML='<div style="color:#4a4868;padding:12px">В банке нет подходящих треков. Добавьте их в разделе «Банк треков».</div>';
   list.forEach(t=>{
-    const where=collNames().filter(c=>Object.values(settings.collections[c]||{}).includes(t.id));
+    const where=roundsContaining(t.id);
     const d=document.createElement('div'); d.className='mrow';
     d.innerHTML=`<div class="ic">${t.lines&&t.lines.length?'✓':'♪'}</div>
       <div class="tt">${t.title||'Без названия'}<small>${t.artist||''}${where.length?' • уже в: '+where.join(', '):''}</small></div>`;
-    d.onclick=()=>{ coll()[pickNumber]=t.id; saveSettings(); $('picker').classList.remove('on'); renderGrid(); };
+    d.onclick=()=>{ activeRound().map[pickNumber]=t.id; saveSettings(); $('picker').classList.remove('on'); renderGrid(); renderRoundTabs(); };
     box.appendChild(d);
   });
 }
 $('pickSearch').oninput=renderPick;
-$('pickClear').onclick=()=>{ delete coll()[pickNumber]; saveSettings(); $('picker').classList.remove('on'); renderGrid(); };
+$('pickClear').onclick=()=>{ delete activeRound().map[pickNumber]; saveSettings(); $('picker').classList.remove('on'); renderGrid(); renderRoundTabs(); };
 $('pickClose').onclick=()=>$('picker').classList.remove('on');
 
 /* ========== ПЛЕЕР ========== */
@@ -505,12 +565,9 @@ async function openTrack(t, number){
     audio.currentTime=hook; audio.play(); $('btnPlay').textContent='⏸';
   });
   if(number){
-    settings.played[settings.collection]=settings.played[settings.collection]||{};
-    settings.history[settings.collection]=settings.history[settings.collection]||[];
-    if(!settings.played[settings.collection][number]){
-      settings.played[settings.collection][number]=true;
-      settings.history[settings.collection].push(number);
-    }
+    const r=activeRound();
+    r.played=r.played||{}; r.history=r.history||[];
+    if(!r.played[number]){ r.played[number]=true; r.history.push(number); }
     saveSettings();
   }
 }
@@ -579,39 +636,44 @@ audio.addEventListener('ended', ()=>$('btnPlay').textContent='▶');
 window.addEventListener('resize', ()=>positionTrack(lastActive<0?0:lastActive));
 
 /* ========== БАНК ТРЕКОВ ========== */
+let libSortAlpha=true;
 function renderLib(){
   const q=$('libSearch').value.toLowerCase().trim();
+  const catF=$('libCatFilter')?$('libCatFilter').value:'';
   const box=$('libList'); box.innerHTML='';
-  const list=bank.filter(t=>!q||(t.title||'').toLowerCase().includes(q)||(t.artist||'').toLowerCase().includes(q))
-                 .sort((a,b)=>(a.title||'').localeCompare(b.title||''));
-  if(!list.length) box.innerHTML='<div style="color:#4a4868;font-size:14px;padding:10px">Банк пуст. Нажмите «+ Новый трек».</div>';
+  let list=bank.filter(t=>!q||(t.title||'').toLowerCase().includes(q)||(t.artist||'').toLowerCase().includes(q));
+  if(catF) list=list.filter(t=>(t.categories&&t.categories.length?t.categories:['Общая']).includes(catF));
+  list=[...list];
+  if(libSortAlpha) list.sort((a,b)=>(a.title||'').localeCompare(b.title||'','ru'));
+  if(!list.length) box.innerHTML='<div style="color:#4a4868;font-size:14px;padding:10px">Ничего не найдено. Измените фильтры или нажмите «+ Новый трек».</div>';
   list.forEach(t=>{
     const d=document.createElement('div');
     d.className='libitem'+(editing&&editing.id===t.id?' sel':'');
-    const used=collNames().filter(c=>Object.values(settings.collections[c]||{}).includes(t.id));
+    const cats=(t.categories&&t.categories.length)?t.categories.join(', '):'без категории';
     d.innerHTML=`<div class="ic">${t.lines&&t.lines.length?'✓':'♪'}</div>
-      <div class="tt">${t.title||'Без названия'}<small>${t.artist||''}${used.length?' • '+used.join(', '):' • не расставлен'}</small></div>
+      <div class="tt">${t.title||'Без названия'}<small>${t.artist||''} • ${cats}</small></div>
       <button class="gh" data-quickdel title="Удалить из банка" style="margin-left:auto;padding:4px 9px;font-size:13px;flex-shrink:0">×</button>`;
     d.onclick=(e)=>{ if(e.target.closest('[data-quickdel]')) return; loadEditor(t); };
     d.querySelector('[data-quickdel]').onclick=async(e)=>{
       e.stopPropagation();
-      const used2=collNames().filter(c=>Object.values(settings.collections[c]||{}).includes(t.id));
+      const used2=roundsContaining(t.id);
       const warn=used2.length?`\n\nТрек стоит в: ${used2.join(', ')} — эти числа освободятся.`:'';
       if(!confirm(`Удалить «${t.title||'без названия'}» из банка?${warn}`)) return;
-      collNames().forEach(c=>{ const m=settings.collections[c]||{};
-        Object.keys(m).forEach(n=>{ if(m[n]===t.id) delete m[n]; }); });
+      removeFromAllRounds(t.id);
       saveSettings();
       await dbDel(t.id); bank=await dbAll();
       if(editing && editing.id===t.id){ editing=null; ensureEditing(); $('btnNewTrack').click(); }
-      renderLib();
+      renderRoundTabs(); renderLib();
     };
     box.appendChild(d);
   });
-  say('lStatus', `${bank.length} треков в банке`);
+  say('lStatus', `${list.length} из ${bank.length} треков в банке`);
 }
 $('libSearch').oninput=renderLib;
+$('libCatFilter').onchange=renderLib;
+$('btnLibAlpha').onclick=()=>{ libSortAlpha=!libSortAlpha; $('btnLibAlpha').classList.toggle('on', libSortAlpha); renderLib(); };
 function ensureEditing(){
-  if(!editing) editing={ id:uid(), title:'', artist:'', album:'', hook:0, lyrics:'', lines:[], audio:null, photo:null };
+  if(!editing) editing={ id:uid(), title:'', artist:'', album:'', hook:0, lyrics:'', lines:[], audio:null, photo:null, categories:['Общая'] };
   return editing;
 }
 // Показывает, что аудио/обложка уже загружены в текущий трек (а не просто
@@ -623,63 +685,41 @@ function updateFileStatus(){
 }
 $('eAudioBtn').onclick=()=>$('eAudio').click();
 $('ePhotoBtn').onclick=()=>$('ePhoto').click();
-// Показывает коллекции, в которых уже стоит трек (с возможностью убрать), и
-// форму добавления в ещё одну — прямо из редактора, без похода на страницу игры.
-function renderEditorCollections(t){
-  const box=$('eCollections'); box.innerHTML='';
-  const memberships=[];
-  collNames().forEach(c=>{ const m=settings.collections[c]||{};
-    Object.keys(m).forEach(n=>{ if(m[n]===t.id) memberships.push({c,n}); }); });
-  if(!memberships.length){
-    box.innerHTML='<span class="usedin">Пока не в одной коллекции</span>';
-  } else {
-    memberships.forEach(({c,n})=>{
-      const chip=document.createElement('span');
-      chip.style.cssText='background:rgba(255,255,255,.08);padding:5px 8px 5px 12px;border-radius:20px;'+
-        'display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--past)';
-      chip.innerHTML=`${c} №${n}`;
-      const x=document.createElement('button'); x.type='button'; x.textContent='×';
-      x.style.cssText='background:none;border:0;color:var(--past);cursor:pointer;font-size:15px;padding:0 2px;line-height:1';
-      x.onclick=()=>{ delete settings.collections[c][n]; saveSettings(); renderEditorCollections(t); renderLib(); };
-      chip.appendChild(x);
-      box.appendChild(chip);
-    });
+// Показывает теги-категории трека (переключаемые чипсы) — используются при
+// случайной раздаче треков по раундам (см. «Разыграть раунд» на странице игры).
+function renderEditorCategories(t){
+  const box=$('eCategories'); box.innerHTML='';
+  t.categories = t.categories && t.categories.length ? t.categories : [];
+  if(!settings.categories.length){
+    box.innerHTML='<span class="usedin">Категорий пока нет — добавьте первую ниже</span>';
   }
-  const sel=$('eAddCollSelect'); sel.innerHTML='';
-  collNames().forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; sel.appendChild(o); });
-  const extra=document.createElement('option'); extra.value='__new'; extra.textContent='+ Новая коллекция...'; sel.appendChild(extra);
-  updateSuggestedNumber();
+  settings.categories.forEach(c=>{
+    const on=t.categories.includes(c);
+    const chip=document.createElement('button'); chip.type='button';
+    chip.className='sec'+(on?' on':''); chip.style.cssText='padding:6px 13px;font-size:13px';
+    chip.textContent=c;
+    chip.onclick=()=>{
+      const idx=t.categories.indexOf(c);
+      if(idx>=0) t.categories.splice(idx,1); else t.categories.push(c);
+      renderEditorCategories(t);
+    };
+    box.appendChild(chip);
+  });
 }
-function updateSuggestedNumber(){
-  const c=$('eAddCollSelect').value; if(!c||c==='__new') return;
-  const m=coll(c); let n=1; while(m[n]) n++;
-  $('eAddCollNumber').value=n;
-}
-$('eAddCollSelect').onchange=()=>{
-  if($('eAddCollSelect').value==='__new'){
-    const n=prompt('Название новой коллекции (например: Хиты 90-х)');
-    if(n){ settings.collections[n]=settings.collections[n]||{}; saveSettings(); renderEditorCollections(editing); $('eAddCollSelect').value=n; }
-    else { $('eAddCollSelect').value=collNames()[0]; }
-  }
-  updateSuggestedNumber();
-};
-$('btnAddToColl').onclick=()=>{
-  if(!editing) return;
-  const c=$('eAddCollSelect').value, n=+$('eAddCollNumber').value;
-  if(!c||c==='__new'||!n||n<1) return say('eStatus','Укажите коллекцию и номер', true);
-  const m=coll(c);
-  if(m[n] && m[n]!==editing.id){
-    if(!confirm(`Число ${n} в «${c}» уже занято другим треком. Заменить?`)) return;
-  }
-  m[n]=editing.id; saveSettings();
-  renderEditorCollections(editing); renderLib();
-  say('eStatus', `Добавлено в «${c}» №${n} ✓`);
+$('btnAddCategory').onclick=()=>{
+  const name=$('eNewCategory').value.trim();
+  if(!name) return say('eStatus','Впишите название категории', true);
+  if(!settings.categories.includes(name)){ settings.categories.push(name); settings.categories.sort(); saveSettings(); }
+  const t=ensureEditing(); t.categories=t.categories||[]; if(!t.categories.includes(name)) t.categories.push(name);
+  $('eNewCategory').value='';
+  renderEditorCategories(t);
+  say('eStatus', `Категория «${name}» добавлена ✓`);
 };
 $('btnNewTrack').onclick=()=>{ editing=null; ensureEditing();
   $('eTitle').value=''; $('eArtist').value=''; $('eAlbum').value=''; $('eHook').value=0; $('eLyrics').value='';
   $('eAudio').value=''; $('ePhoto').value=''; $('eAudioQuery').value='';
   $('eSpotifyQuery').value=''; $('spotifyResults').style.display='none'; $('spotifyResults').innerHTML='';
-  updateFileStatus(); renderEditorCollections(editing);
+  updateFileStatus(); renderEditorCategories(editing);
   say('eStatus','Новый трек — загрузите аудио или найдите трек на Spotify'); renderLib(); };
 function loadEditor(t){
   editing=t;
@@ -688,7 +728,7 @@ function loadEditor(t){
   $('eAudio').value=''; $('ePhoto').value='';
   $('eAudioQuery').value=`${t.artist||''} ${t.title||''}`.trim();
   $('eSpotifyQuery').value=''; $('spotifyResults').style.display='none'; $('spotifyResults').innerHTML='';
-  renderEditorCollections(t);
+  renderEditorCategories(t);
   updateFileStatus();
   say('eStatus', t.audio ? (t.lines&&t.lines.length?'Трек готов ✓':'Аудио есть, текст не синхронизирован') : 'Загрузите аудиофайл');
   renderLib();
@@ -794,16 +834,13 @@ $('btnSaveTrack').onclick=async()=>{
 };
 $('btnDelTrack').onclick=async()=>{
   if(!editing||!editing.audio) return;
-  const used=[];
-  collNames().forEach(c=>{ const m=settings.collections[c]||{};
-    Object.keys(m).forEach(n=>{ if(m[n]===editing.id) used.push(`${c} №${n}`); }); });
+  const used=roundsContaining(editing.id);
   const warn = used.length ? `\n\nТрек стоит в: ${used.join(', ')} — эти числа освободятся.` : '';
   if(!confirm(`Удалить «${editing.title||'без названия'}» из банка?${warn}`)) return;
-  collNames().forEach(c=>{ const m=settings.collections[c]||{};
-    Object.keys(m).forEach(n=>{ if(m[n]===editing.id) delete m[n]; }); });
+  removeFromAllRounds(editing.id);
   saveSettings();
   await dbDel(editing.id); bank=await dbAll(); editing=null; ensureEditing();
-  $('btnNewTrack').click(); say('eStatus','Удалено из банка');
+  renderRoundTabs(); $('btnNewTrack').click(); say('eStatus','Удалено из банка');
 };
 $('btnPreview').onclick=()=>{ const t=collectEditor();
   if(!t.audio) return say('eStatus','Нужен аудиофайл', true); openTrack(t,null); };
@@ -922,7 +959,7 @@ async function downloadOneTrack(line){
 
   await dbPut({
     id:uid(), title: title||'Без названия', artist, album, hook:0,
-    lyrics, lines:[], audio:audioFile, photo:photoBlob
+    lyrics, lines:[], audio:audioFile, photo:photoBlob, categories:['Общая']
   });
 }
 
@@ -1100,16 +1137,48 @@ $('btnSyncRestart').onclick=()=>{
 };
 $('btnSyncExit').onclick=exitSync;
 
-/* ========== СТАРТ + миграция старой структуры ========== */
+/* ========== СТАРТ + миграция старой структуры (коллекции→категории, раунды) ========== */
+async function migrateToRoundsAndCategories(){
+  let dirty=false;
+  // очень старый формат: трек хранил номер/коллекцию сам в себе
+  bank.forEach(t=>{
+    if(t.collection && t.number){
+      t.categories=t.categories||[];
+      if(!t.categories.includes(t.collection)){ t.categories.push(t.collection); dirty=true; }
+    }
+  });
+  if(!settings.rounds){
+    // старая структура: settings.collections { имя: {номер: trackId} } + played/history по имени коллекции.
+    // Коллекция становится категорией-тегом на треке, а активная коллекция переезжает в Раунд 1,
+    // чтобы не терять уже идущую игру.
+    const oldCollections = settings.collections || {};
+    const catSet = new Set(['Общая']);
+    Object.keys(oldCollections).forEach(name=>{
+      catSet.add(name);
+      Object.values(oldCollections[name]).forEach(trackId=>{
+        const t=bank.find(x=>x.id===trackId);
+        if(t){ t.categories=t.categories||[]; if(!t.categories.includes(name)){ t.categories.push(name); dirty=true; } }
+      });
+    });
+    (settings.categories||[]).forEach(c=>catSet.add(c));
+    settings.categories=[...catSet].sort();
+    const curName = settings.collection || 'Общая';
+    settings.rounds=[
+      { category:curName, size:settings.size||30, map:oldCollections[curName]||{},
+        played:(settings.played||{})[curName]||{}, history:(settings.history||{})[curName]||[] },
+      freshRound(), freshRound()
+    ];
+    settings.activeRound=0;
+    delete settings.collections; delete settings.collection; delete settings.played; delete settings.history; delete settings.size;
+  }
+  bank.forEach(t=>{ if(!t.categories||!t.categories.length){ t.categories=['Общая']; dirty=true; } });
+  saveSettings();
+  if(dirty){ for(const t of bank) await dbPut(t); }
+}
 (async function init(){
   try{ bank=await dbAll(); }catch(e){ bank=[]; }
-  // старые треки хранили collection и number внутри себя — переносим в коллекции
-  let migrated=false;
-  bank.forEach(t=>{ if(t.collection && t.number){
-    const m=coll(t.collection); if(!m[t.number]){ m[t.number]=t.id; migrated=true; } } });
-  if(migrated) saveSettings();
-  $('gSize').value=settings.size;
-  fillCollSelect(); renderGrid();
+  await migrateToRoundsAndCategories();
+  syncRoundControls(); renderRoundTabs(); renderGrid();
 })();
 </script>
 </body>
