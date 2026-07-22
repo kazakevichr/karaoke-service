@@ -100,45 +100,76 @@ async function getSpotifyToken() {
   return spotifyToken;
 }
 
-// Поиск трека: возвращает варианты с названием, исполнителем, альбомом и обложкой
-app.get('/api/search-track', async (req, res) => {
-  try {
-    const q = (req.query.q || '').trim();
-    if (!q) return res.status(400).json({ error: 'Пустой запрос' });
+// Запасной источник метаданных/текста — Яндекс.Музыка (через yandex-music
+// Python-библиотеку и небольшой скрипт-мост scripts/ym_lookup.py). Используется,
+// только если Spotify недоступен (например, требует Premium у владельца
+// приложения) или ничего не нашёл. Токен YANDEX_MUSIC_TOKEN опционален —
+// поиск и метаданные у Яндекса по большей части доступны и анонимно.
+function runYandexScript(mode, query) {
+  return new Promise((resolve, reject) => {
+    const scriptPath = path.join(__dirname, 'scripts', 'ym_lookup.py');
+    const proc = spawn('python3', [scriptPath, mode, query]);
+    let stdout = '', stderr = '';
+    proc.stdout.on('data', d => { stdout += d; });
+    proc.stderr.on('data', d => { stderr += d; });
+    proc.on('error', (e) => reject(new Error('python3/ym_lookup.py не найден: ' + e.message)));
+    proc.on('close', () => {
+      const lastLine = stdout.trim().split('\n').filter(Boolean).pop();
+      try {
+        resolve(JSON.parse(lastLine));
+      } catch (e) {
+        reject(new Error(stderr.trim() || 'Не удалось разобрать ответ Яндекс.Музыки'));
+      }
+    });
+  });
+}
 
+// Поиск трека: возвращает варианты с названием, исполнителем, альбомом и обложкой.
+// Сначала Spotify, при неудаче — Яндекс.Музыка как запасной источник.
+app.get('/api/search-track', async (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (!q) return res.status(400).json({ error: 'Пустой запрос' });
+
+  try {
     const token = await getSpotifyToken();
     const r = await fetch(
       `https://api.spotify.com/v1/search?q=${encodeURIComponent(q)}&type=track&limit=8`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
 
-    if (!r.ok) {
-      const errText = await r.text();
-      console.error('Spotify search error:', errText);
-      return res.status(r.status).json({ error: 'Ошибка поиска в Spotify' });
+    if (r.ok) {
+      const data = await r.json();
+      const tracks = (data.tracks?.items || []).map(t => ({
+        title: t.name,
+        artist: (t.artists || []).map(a => a.name).join(', '),
+        album: t.album?.name || '',
+        cover: t.album?.images?.[0]?.url || '',
+        spotifyUrl: t.external_urls?.spotify || ''
+      }));
+      if (tracks.length) return res.json({ tracks, source: 'spotify' });
+    } else {
+      console.warn('Spotify search error, пробуем Яндекс.Музыку:', await r.text());
     }
+  } catch (e) {
+    console.warn('Spotify недоступен, пробуем Яндекс.Музыку:', e.message);
+  }
 
-    const data = await r.json();
-    const tracks = (data.tracks?.items || []).map(t => ({
-      title: t.name,
-      artist: (t.artists || []).map(a => a.name).join(', '),
-      album: t.album?.name || '',
-      cover: t.album?.images?.[0]?.url || '',
-      spotifyUrl: t.external_urls?.spotify || ''
-    }));
-
-    res.json({ tracks });
+  try {
+    const result = await runYandexScript('search', q);
+    if (result.error) return res.status(502).json({ error: 'Spotify и Яндекс.Музыка недоступны: ' + result.error });
+    return res.json({ tracks: result.tracks || [], source: 'yandex' });
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: e.message });
+    return res.status(502).json({ error: 'Spotify и Яндекс.Музыка недоступны: ' + e.message });
   }
 });
 
-// Прокси для обложки: скачиваем на сервере, чтобы не упираться в CORS в браузере
+// Прокси для обложки: скачиваем на сервере, чтобы не упираться в CORS в браузере.
+// Разрешены обложки Spotify и Яндекс.Музыки.
 app.get('/api/cover-proxy', async (req, res) => {
   try {
     const url = req.query.url || '';
-    if (!/^https:\/\/i\.scdn\.co\//.test(url)) {
+    if (!/^https:\/\/(i\.scdn\.co|avatars\.yandex\.net)\//.test(url)) {
       return res.status(400).json({ error: 'Некорректный URL обложки' });
     }
     const r = await fetch(url);
@@ -152,28 +183,34 @@ app.get('/api/cover-proxy', async (req, res) => {
   }
 });
 
-// Текст песни: бесплатный источник без ключа. Если не нашёл — фронт просто
-// оставит поле пустым, пользователь впишет текст вручную.
+// Текст песни: сначала бесплатный lyrics.ovh, при неудаче — Яндекс.Музыка как
+// запасной источник. Если оба не нашли — фронт оставит поле пустым, текст
+// впишется вручную, как и раньше.
 app.get('/api/lyrics', async (req, res) => {
-  try {
-    const artist = (req.query.artist || '').trim();
-    const title = (req.query.title || '').trim();
-    if (!artist || !title) return res.status(400).json({ error: 'Нужны artist и title' });
+  const artist = (req.query.artist || '').trim();
+  const title = (req.query.title || '').trim();
+  if (!artist || !title) return res.status(400).json({ error: 'Нужны artist и title' });
 
+  try {
     const r = await fetch(
       `https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`
     );
     const data = await r.json().catch(() => ({}));
-
-    if (!r.ok || !data.lyrics) {
-      return res.status(404).json({ error: 'Текст не найден' });
-    }
-
-    res.json({ lyrics: data.lyrics.trim() });
+    if (r.ok && data.lyrics) return res.json({ lyrics: data.lyrics.trim(), source: 'lyrics.ovh' });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
+    console.warn('lyrics.ovh недоступен, пробуем Яндекс.Музыку:', e.message);
   }
+
+  try {
+    const result = await runYandexScript('lyrics', `${artist} ${title}`.trim());
+    if (!result.error && result.lyrics) {
+      return res.json({ lyrics: result.lyrics.trim(), source: 'yandex' });
+    }
+  } catch (e) {
+    console.warn('Яндекс.Музыка (текст) недоступна:', e.message);
+  }
+
+  res.status(404).json({ error: 'Текст не найден' });
 });
 
 /* ==========================================================================
