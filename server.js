@@ -19,7 +19,27 @@ const upload = multer({
   limits: { fileSize: 25 * 1024 * 1024 } // лимит Whisper API — 25 МБ
 });
 
-app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
+app.post('/api/transcribe', (req, res) => {
+  upload.single('audio')(req, res, async (uploadErr) => {
+    if (uploadErr) {
+      // Ошибки multer (например, превышен лимит размера) не должны улетать
+      // в дефолтный HTML-обработчик Express — фронт ждёт JSON.
+      const code = uploadErr.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+      const msg = uploadErr.code === 'LIMIT_FILE_SIZE'
+        ? 'Аудиофайл слишком большой для распознавания (лимит 25 МБ)'
+        : 'Ошибка загрузки файла: ' + uploadErr.message;
+      return res.status(code).json({ error: msg });
+    }
+    try {
+      await transcribeHandler(req, res);
+    } catch (e) {
+      console.error(e);
+      if (!res.headersSent) res.status(500).json({ error: e.message });
+    }
+  });
+});
+
+async function transcribeHandler(req, res) {
   try {
     if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
     if (!process.env.OPENAI_API_KEY) {
@@ -57,7 +77,7 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
     console.error(e);
     res.status(500).json({ error: e.message });
   }
-});
+}
 
 /* ==========================================================================
    Метаданные трека (по образцу spotDL): название, исполнитель, альбом,
@@ -213,6 +233,47 @@ app.get('/api/lyrics', async (req, res) => {
   res.status(404).json({ error: 'Текст не найден' });
 });
 
+// Ищет несколько вариантов на YouTube (без скачивания) — название, канал,
+// длительность, превью — чтобы можно было выбрать нужную версию вручную,
+// а не слепо качать первый результат (который может оказаться кавером
+// или записью с концерта).
+app.get('/api/search-youtube', async (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (!q) return res.status(400).json({ error: 'Пустой запрос' });
+
+  const args = [`ytsearch6:${q}`, '--dump-json', '--no-warnings', '--no-playlist'];
+  const proc = spawn('yt-dlp', args);
+  let stdout = '', stderr = '';
+  proc.stdout.on('data', d => { stdout += d; });
+  proc.stderr.on('data', d => { stderr += d; });
+
+  let responded = false;
+  proc.on('error', (e) => {
+    if (responded) return;
+    responded = true;
+    res.status(500).json({ error: 'yt-dlp не установлен на сервере (нужен Docker-деплой)' });
+  });
+
+  proc.on('close', () => {
+    if (responded) return;
+    responded = true;
+    if (!stdout.trim()) {
+      console.error('yt-dlp search error:', stderr);
+      return res.status(502).json({ error: 'Ничего не нашлось или ошибка поиска на YouTube' });
+    }
+    const results = stdout.trim().split('\n').filter(Boolean).map(line => {
+      try { return JSON.parse(line); } catch (e) { return null; }
+    }).filter(Boolean).map(v => ({
+      title: v.title || '',
+      uploader: v.uploader || v.channel || '',
+      duration: v.duration || 0,
+      thumbnail: v.thumbnail || (Array.isArray(v.thumbnails) && v.thumbnails.length ? v.thumbnails[v.thumbnails.length - 1].url : ''),
+      url: v.webpage_url || (v.id ? `https://www.youtube.com/watch?v=${v.id}` : '')
+    })).filter(v => v.url);
+    res.json({ results });
+  });
+});
+
 /* ==========================================================================
    Скачивание аудио с YouTube (как spotDL: ищет трек по названию/исполнителю
    и скачивает лучший аудио-поток). Требует установленный yt-dlp в PATH —
@@ -225,17 +286,23 @@ app.get('/api/fetch-audio', async (req, res) => {
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
 
   const isUrl = /^https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//.test(q);
-  const target = isUrl ? q : `ytsearch1:${q}`;
+  // Берём топ-5 результатов поиска и скачиваем первый, что короче 10 минут —
+  // так реже попадаются концертные записи/сборники вместо самого трека.
+  // Файл ограничен 20 МБ (с запасом под лимит Whisper в 25 МБ на распознавание).
+  const target = isUrl ? q : `ytsearch5:${q}`;
   const base = path.join(os.tmpdir(), `yt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
   const args = [
     target,
     '--no-playlist',
     '-f', 'bestaudio[ext=m4a]/bestaudio/best',
-    '--max-filesize', '30m',
+    '--max-filesize', '20m',
     '--no-warnings',
     '-o', `${base}.%(ext)s`
   ];
+  if (!isUrl) {
+    args.push('--match-filter', 'duration < 600', '--max-downloads', '1');
+  }
 
   const proc = spawn('yt-dlp', args);
   let stderr = '';
