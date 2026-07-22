@@ -313,7 +313,7 @@ $('btnRandom').onclick = () => {
   if(el){ el.classList.add('last'); el.scrollIntoView({block:'center'}); }
   say('gStatus', `Выпало число ${t.number}`);
 };
-$('btnToLib').onclick = () => { show('vLib'); renderLib(); };
+$('btnToLib').onclick = () => { show('vLib'); renderLib(); ensureEditing(); };
 $('btnToGrid').onclick = () => { show('vGrid'); renderGrid(); };
 $('btnFullG').onclick = $('btnFullP') ? toggleFull : null;
 function toggleFull(){ if(!document.fullscreenElement) document.documentElement.requestFullscreen(); else document.exitFullscreen(); }
@@ -427,6 +427,16 @@ function nextFreeNumber(){
   for(let i=1;i<=60;i++) if(!used.has(i)) return i;
   return null;
 }
+/* если пользователь начал заполнять форму, не нажав «+ Трек» — создаём черновик сами */
+function ensureEditing(){
+  if(!editing){
+    editing = { id:uid(), collection:$('eColl').value||$('lCollection').value||'Общая',
+                number:+$('eNumber').value||nextFreeNumber(), title:'', artist:'', hook:0,
+                lyrics:'', lines:[], audio:null, photo:null };
+    if(!$('eNumber').value) $('eNumber').value = editing.number||'';
+  }
+  return editing;
+}
 function loadEditor(t){
   editing = t;
   $('eNumber').value=t.number||''; $('eTitle').value=t.title||''; $('eArtist').value=t.artist||'';
@@ -436,19 +446,21 @@ function loadEditor(t){
   say('eStatus', t.audio ? (t.lines&&t.lines.length ? 'Трек готов ✓' : 'Аудио есть, текст не синхронизирован') : 'Загрузите аудиофайл');
   renderLib();
 }
-$('eAudio').onchange = e => { const f=e.target.files[0]; if(!f||!editing) return;
-  editing.audio=f; if(!editing.title) { editing.title=f.name.replace(/\.[^.]+$/,''); $('eTitle').value=editing.title; }
+$('eAudio').onchange = e => { const f=e.target.files[0]; if(!f) return;
+  const t=ensureEditing(); t.audio=f;
+  if(!$('eTitle').value){ $('eTitle').value=f.name.replace(/\.[^.]+$/,''); }
   say('eStatus','Аудио загружено — не забудьте «Сохранить трек»'); };
-$('ePhoto').onchange = e => { const f=e.target.files[0]; if(!f||!editing) return;
+$('ePhoto').onchange = e => { const f=e.target.files[0]; if(!f) return;
+  const t=ensureEditing();
   const img=new Image();
   img.onload=()=>{ const max=620, sc=Math.min(1,max/Math.max(img.width,img.height));
     const cv=document.createElement('canvas'); cv.width=Math.round(img.width*sc); cv.height=Math.round(img.height*sc);
     cv.getContext('2d').drawImage(img,0,0,cv.width,cv.height);
-    cv.toBlob(b=>{ editing.photo=b; say('eStatus','Фото загружено ✓'); },'image/jpeg',.82); };
+    cv.toBlob(b=>{ t.photo=b; say('eStatus','Фото загружено ✓'); },'image/jpeg',.82); };
   img.src=URL.createObjectURL(f); };
 
 function collectEditor(){
-  if(!editing) return null;
+  ensureEditing();
   editing.number = +$('eNumber').value||null;
   editing.title=$('eTitle').value; editing.artist=$('eArtist').value;
   editing.hook=+$('eHook').value||0; editing.lyrics=$('eLyrics').value;
@@ -456,8 +468,8 @@ function collectEditor(){
   return editing;
 }
 $('btnSaveTrack').onclick = async () => {
-  const t=collectEditor(); if(!t) return;
-  if(!t.audio) return say('eStatus','Нужен аудиофайл', true);
+  const t=collectEditor();
+  if(!t.audio) return say('eStatus','Нужен аудиофайл — выберите его в поле «Аудиофайл»', true);
   try { await dbPut(t); tracks = await dbAll(); fillSelects(); renderLib(); say('eStatus','Сохранено ✓'); }
   catch(e){ say('eStatus','Ошибка сохранения: '+e.message, true); }
 };
@@ -466,7 +478,9 @@ $('btnDelTrack').onclick = async () => {
   if(!confirm('Удалить трек «'+(editing.title||'без названия')+'»?')) return;
   await dbDel(editing.id); tracks=await dbAll(); editing=null; renderLib(); say('eStatus','Удалено');
 };
-$('btnPreview').onclick = () => { const t=collectEditor(); if(t&&t.audio) openTrack(t); };
+$('btnPreview').onclick = () => { const t=collectEditor();
+  if(!t.audio) return say('eStatus','Нужен аудиофайл', true);
+  openTrack(t); };
 
 /* ================= СИНХРОНИЗАЦИЯ ================= */
 function parseLyrics(raw){
@@ -499,12 +513,13 @@ function align(ww, ll, duration){
 }
 $('btnAuto').onclick = async () => {
   const t=collectEditor();
-  if(!t||!t.audio) return say('eStatus','Нужен аудиофайл', true);
+  if(!t.audio) return say('eStatus','Нужен аудиофайл — выберите его в поле «Аудиофайл»', true);
   if(!t.lyrics.trim()) return say('eStatus','Вставьте текст песни', true);
   say('eStatus','<span class="spin"></span>Распознаю и выравниваю...');
   $('btnAuto').disabled=true;
   try{
-    const fd=new FormData(); fd.append('audio',t.audio,'track.mp3'); fd.append('lyricsHint',t.lyrics.slice(0,800));
+    const fname = t.audio.name || ('track.' + ((t.audio.type||'audio/mpeg').split('/')[1]||'mp3'));
+    const fd=new FormData(); fd.append('audio',t.audio,fname); fd.append('lyricsHint',t.lyrics.slice(0,800));
     const r=await fetch('/api/transcribe',{method:'POST',body:fd}); const d=await r.json();
     if(!r.ok) throw new Error(d.error||'ошибка сервера');
     const res=align(d.words||[], parseLyrics(t.lyrics), d.duration);
@@ -516,7 +531,7 @@ $('btnAuto').onclick = async () => {
 };
 $('btnManual').onclick = () => {
   const t=collectEditor();
-  if(!t||!t.audio) return say('eStatus','Нужен аудиофайл', true);
+  if(!t.audio) return say('eStatus','Нужен аудиофайл — выберите его в поле «Аудиофайл»', true);
   if(!t.lyrics.trim()) return say('eStatus','Вставьте текст песни', true);
   syncLines = parseLyrics(t.lyrics);
   syncMode=true; syncIdx=0; syncTimes=[];
