@@ -231,13 +231,19 @@
       <div class="row">
         <div class="fld">
           <label class="f">Аудиофайл</label>
-          <input type="file" id="eAudio" accept="audio/*">
-          <div class="usedin" id="eAudioStatus"></div>
+          <div style="display:flex;gap:9px;align-items:center">
+            <button class="sec" type="button" id="eAudioBtn">Выбрать файл</button>
+            <span class="usedin" id="eAudioStatus">Файл не выбран</span>
+          </div>
+          <input type="file" id="eAudio" accept="audio/*" style="display:none">
         </div>
         <div class="fld">
           <label class="f">Фото / обложка</label>
-          <input type="file" id="ePhoto" accept="image/*">
-          <div class="usedin" id="ePhotoStatus"></div>
+          <div style="display:flex;gap:9px;align-items:center">
+            <button class="sec" type="button" id="ePhotoBtn">Выбрать файл</button>
+            <span class="usedin" id="ePhotoStatus">Файл не выбран</span>
+          </div>
+          <input type="file" id="ePhoto" accept="image/*" style="display:none">
         </div>
       </div>
       <div class="row">
@@ -245,10 +251,11 @@
           <label class="f">Заменить аудио (поиск на YouTube — если попал кавер или запись с концерта)</label>
           <div class="spot-search">
             <input type="text" id="eAudioQuery" placeholder="исполнитель название, или ссылка на YouTube">
-            <button class="sec" id="btnRedownloadAudio" type="button">Перекачать</button>
+            <button class="sec" id="btnSearchYoutube" type="button">Искать варианты</button>
           </div>
         </div>
       </div>
+      <div class="row" id="youtubeResults" style="display:none"></div>
       <div class="row">
         <div class="fld full">
           <label class="f">Коллекции трека</label>
@@ -611,9 +618,11 @@ function ensureEditing(){
 // "Файл не выбран" — нативный input не умеет сам это отображать).
 function updateFileStatus(){
   const t=editing;
-  $('eAudioStatus').textContent = t&&t.audio ? `Загружено: ${t.audio.name||'аудио'} ✓ (выберите файл, чтобы заменить)` : '';
-  $('ePhotoStatus').textContent = t&&t.photo ? 'Обложка загружена ✓ (выберите файл, чтобы заменить)' : '';
+  $('eAudioStatus').textContent = t&&t.audio ? `✓ ${t.audio.name||'аудио загружено'}` : 'Файл не выбран';
+  $('ePhotoStatus').textContent = t&&t.photo ? '✓ обложка загружена' : 'Файл не выбран';
 }
+$('eAudioBtn').onclick=()=>$('eAudio').click();
+$('ePhotoBtn').onclick=()=>$('ePhoto').click();
 // Показывает коллекции, в которых уже стоит трек (с возможностью убрать), и
 // форму добавления в ещё одну — прямо из редактора, без похода на страницу игры.
 function renderEditorCollections(t){
@@ -709,25 +718,50 @@ function setPhotoFromBlob(blob){
 $('ePhoto').onchange=e=>{ const f=e.target.files[0]; if(!f) return;
   setPhotoFromBlob(f).then(()=>say('eStatus','Фото загружено ✓')); };
 
-// Перекачать аудио с YouTube для уже открытого трека — например, если
-// автопоиск подобрал кавер или запись с концерта вместо студийной версии.
-$('btnRedownloadAudio').onclick=async()=>{
+// Заменить аудио: сначала показываем НЕСКОЛЬКО вариантов с YouTube (без
+// скачивания — только название/канал/длительность/превью), пользователь
+// выбирает нужный, и только тогда качаем именно это видео. Так не попадаем
+// слепо на кавер/концерт и не качаем каждый раз один и тот же топ-результат.
+function fmtDur(s){ if(!s) return ''; s=Math.round(s); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
+$('btnSearchYoutube').onclick=async()=>{
   const q=$('eAudioQuery').value.trim() || `${$('eArtist').value} ${$('eTitle').value}`.trim();
   if(!q) return say('eStatus','Впишите исполнителя/название или ссылку на YouTube', true);
-  say('eStatus','<span class="spin"></span>Качаю аудио с YouTube...');
-  $('btnRedownloadAudio').disabled=true;
+  say('eStatus','<span class="spin"></span>Ищу варианты на YouTube (может занять до 10-15 секунд)...');
+  $('btnSearchYoutube').disabled=true;
   try{
-    const r=await fetch('/api/fetch-audio?q='+encodeURIComponent(q));
+    const r=await fetch('/api/search-youtube?q='+encodeURIComponent(q));
+    const data=await r.json();
+    if(!r.ok) throw new Error(data.error||'ошибка поиска');
+    renderYoutubeResults(data.results||[]);
+    say('eStatus', data.results&&data.results.length ? `Найдено ${data.results.length} — выберите нужную версию` : 'Ничего не найдено, попробуйте другой запрос');
+  }catch(e){ say('eStatus','Ошибка поиска: '+e.message, true); }
+  finally{ $('btnSearchYoutube').disabled=false; }
+};
+function renderYoutubeResults(results){
+  const box=$('youtubeResults');
+  box.innerHTML=''; box.style.display=results.length?'flex':'none'; box.style.flexDirection='column';
+  results.forEach(v=>{
+    const d=document.createElement('div'); d.className='libitem';
+    d.innerHTML=`<div class="ic">${v.thumbnail?`<img src="${v.thumbnail}" alt="">`:'▶'}</div>
+      <div class="tt">${v.title}<small>${v.uploader}${v.duration?' • '+fmtDur(v.duration):''}</small></div>`;
+    d.onclick=()=>applyYoutubeChoice(v);
+    box.appendChild(d);
+  });
+}
+async function applyYoutubeChoice(v){
+  say('eStatus','<span class="spin"></span>Качаю выбранное видео...');
+  try{
+    const r=await fetch('/api/fetch-audio?q='+encodeURIComponent(v.url));
     if(!r.ok){ const d=await r.json().catch(()=>({})); throw new Error(d.error||'ошибка скачивания'); }
     const blob=await r.blob();
     const ext = blob.type.includes('webm')?'webm':blob.type.includes('mpeg')?'mp3':'m4a';
     const t=ensureEditing();
-    t.audio=new File([blob], `${(q||'track').replace(/[\\/:*?"<>|]/g,'')}.${ext}`, { type: blob.type||'audio/mp4' });
+    t.audio=new File([blob], `${(v.title||'track').replace(/[\\/:*?"<>|]/g,'')}.${ext}`, { type: blob.type||'audio/mp4' });
     updateFileStatus();
-    say('eStatus','Аудио перекачано ✓ Проверьте («Проверить») и нажмите «Сохранить в банк»');
+    $('youtubeResults').style.display='none';
+    say('eStatus','Аудио заменено ✓ Проверьте («Проверить») и нажмите «Сохранить в банк»');
   }catch(e){ say('eStatus','Ошибка: '+e.message, true); }
-  finally{ $('btnRedownloadAudio').disabled=false; }
-};
+}
 
 // Ищет только текст песни по текущим названию/исполнителю — без пере-поиска
 // метаданных на Spotify. Полезно, когда трек добавлен массовой загрузкой,
