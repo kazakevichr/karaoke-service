@@ -8,42 +8,43 @@
   :root {
     --bg: #0d0b1a; --bg2: #171332;
     --accent: #ff2e63; --accent2: #3b82f6;
-    --dim: #4a4868; --past: #8a87b8; --now: #ffffff;
+    --dim: #4a4868; --past: #8a87b8;
   }
   * { box-sizing: border-box; }
   html, body {
-    margin: 0; height: 100%;
-    background: radial-gradient(ellipse at center, var(--bg2) 0%, var(--bg) 70%);
+    margin: 0; height: 100%; overflow: hidden;
+    background: radial-gradient(ellipse at 50% 0%, var(--bg2) 0%, var(--bg) 70%);
     font-family: 'Segoe UI', Arial, sans-serif; color: #fff;
   }
   .app { display: flex; flex-direction: column; height: 100vh; }
 
+  /* ---------- Панель настроек ---------- */
   .panel {
-    padding: 16px 24px; background: rgba(0,0,0,.3);
+    padding: 14px 22px; background: rgba(0,0,0,.35);
     border-bottom: 1px solid rgba(255,255,255,.08);
-    display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end; flex-shrink: 0;
+    display: flex; flex-wrap: wrap; gap: 13px; align-items: flex-end; flex-shrink: 0;
   }
   .panel.collapsed { display: none; }
   .field { display: flex; flex-direction: column; gap: 5px; }
   .field label { font-size: 11px; color: var(--past); text-transform: uppercase; letter-spacing: .06em; }
   input[type=file], input[type=number], input[type=text], textarea {
     background: #1e1a3d; border: 1px solid rgba(255,255,255,.15);
-    color: #fff; padding: 8px 11px; border-radius: 8px; font-size: 14px;
-    font-family: inherit;
+    color: #fff; padding: 8px 11px; border-radius: 8px; font-size: 14px; font-family: inherit;
   }
-  input[type=number] { width: 90px; }
-  textarea { width: 380px; height: 74px; resize: vertical; line-height: 1.4; }
+  input[type=number] { width: 85px; }
+  input[type=text] { width: 150px; }
+  textarea { width: 320px; height: 70px; resize: vertical; line-height: 1.4; }
   button {
     background: linear-gradient(135deg, var(--accent), #ff5f8f);
-    border: 0; color: #fff; padding: 10px 18px; border-radius: 8px;
+    border: 0; color: #fff; padding: 10px 17px; border-radius: 8px;
     font-size: 14px; font-weight: 600; cursor: pointer;
   }
   button.sec { background: rgba(255,255,255,.1); }
   button:disabled { opacity: .4; cursor: not-allowed; }
-  .status { font-size: 13px; color: var(--past); max-width: 320px; }
+  .status { font-size: 13px; color: var(--past); max-width: 300px; }
   .status.err { color: var(--accent); }
 
-  .chips { padding: 10px 24px; display: flex; gap: 8px; flex-wrap: wrap; flex-shrink: 0;
+  .chips { padding: 9px 22px; display: flex; gap: 8px; flex-wrap: wrap; flex-shrink: 0;
            background: rgba(0,0,0,.15); border-bottom: 1px solid rgba(255,255,255,.06); }
   .chips.hidden { display: none; }
   .chip { background: #1e1a3d; border: 1px solid rgba(255,255,255,.12); padding: 6px 13px;
@@ -51,41 +52,91 @@
   .chip:hover { color: #fff; border-color: var(--accent); }
   .chip .x { margin-left: 8px; opacity: .5; }
 
-  .stage { flex: 1; position: relative; overflow: hidden; display: flex;
-           align-items: center; justify-content: center; padding: 0 40px; }
-  .meta { position: absolute; top: 18px; left: 0; right: 0; text-align: center;
-          color: var(--past); font-size: 14px; pointer-events: none; }
-  .meta .t { color: #fff; font-weight: 700; font-size: 22px; }
+  /* ---------- Сцена: 3 зоны ---------- */
+  .stage {
+    flex: 1; min-height: 0;
+    display: grid;
+    grid-template-columns: 40% 60%;
+    grid-template-rows: 44% 56%;
+    position: relative;
+  }
+  .zone-photo {
+    grid-row: 1; grid-column: 1;
+    display: flex; align-items: center; justify-content: center;
+    padding: 3vh 2vw 2vh 3vw; min-height: 0;
+  }
+  .zone-photo img {
+    max-width: 100%; max-height: 100%; object-fit: contain;
+    border-radius: 18px; box-shadow: 0 18px 60px rgba(0,0,0,.65), 0 0 0 1px rgba(255,255,255,.08);
+  }
+  .photo-ph {
+    width: 78%; aspect-ratio: 1; border-radius: 18px;
+    background: linear-gradient(145deg, #241f4d, #16123a);
+    border: 1px dashed rgba(255,255,255,.14);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 8vh; color: rgba(255,255,255,.13);
+  }
+  .zone-info {
+    grid-row: 1; grid-column: 2;
+    display: flex; flex-direction: column; justify-content: center;
+    padding: 3vh 4vw 2vh 2vw; min-height: 0; gap: 1.4vh;
+  }
+  .zone-info .title {
+    font-size: 7vh; font-weight: 800; line-height: 1.05; letter-spacing: -.02em;
+    text-shadow: 0 4px 40px rgba(255,46,99,.35);
+    overflow-wrap: break-word;
+  }
+  .zone-info .artist {
+    font-size: 4vh; font-weight: 600; color: var(--accent);
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+  .zone-info .divider { width: 90px; height: 4px; border-radius: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2)); }
 
-  .lyrics { width: 100%; max-width: 1000px; text-align: center;
-            max-height: 100%; overflow: hidden; }
-  .line { font-size: 40px; font-weight: 700; line-height: 1.5; color: var(--dim);
-          transition: color .25s, opacity .25s, transform .25s; opacity: .45; padding: 4px 0; }
-  .line.done { color: var(--past); opacity: .5; }
-  .line.active { color: var(--now); opacity: 1; transform: scale(1.04); }
-  .line.active .w.sung { text-shadow: 0 0 22px var(--accent), 0 0 45px rgba(255,46,99,.55); }
-  .w { display: inline-block; margin: 0 5px; }
-  .line.active .w { color: var(--past); }
-  .line.active .w.sung { color: #fff; }
+  .zone-lyrics {
+    grid-row: 2; grid-column: 1 / -1;
+    position: relative; overflow: hidden;
+    border-top: 1px solid rgba(255,255,255,.07);
+    background: linear-gradient(180deg, rgba(255,255,255,.02), transparent);
+  }
+  .lyr-track {
+    position: absolute; left: 0; right: 0; top: 0;
+    padding: 0 5vw; text-align: center;
+    transition: transform .45s cubic-bezier(.4,0,.2,1);
+  }
+  .line {
+    font-size: 5.2vh; font-weight: 700; line-height: 1.35; padding: .5vh 0;
+    color: var(--dim); opacity: 0;
+    transition: color .3s, opacity .35s, transform .35s;
+  }
+  .line.n2 { opacity: .22; }
+  .line.n1 { opacity: .45; color: var(--past); }
+  .line.active { opacity: 1; transform: scale(1.05); }
+  .line .w { display: inline-block; margin: 0 .28em; color: inherit; }
+  .line.active .w { color: var(--past); transition: color .12s, text-shadow .12s; }
+  .line.active .w.sung { color: #fff; text-shadow: 0 0 22px var(--accent), 0 0 48px rgba(255,46,99,.5); }
 
-  .hint { color: var(--dim); font-size: 16px; line-height: 1.6; }
+  .hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+          text-align: center; color: var(--dim); font-size: 2.2vh; line-height: 1.7; padding: 0 6vw; }
 
-  .sync { position: absolute; inset: 0; background: rgba(8,6,20,.96); z-index: 20;
-          display: none; flex-direction: column; padding: 20px 40px; }
+  /* ---------- Синхронизация ---------- */
+  .sync { position: absolute; inset: 0; background: rgba(8,6,20,.97); z-index: 20;
+          display: none; flex-direction: column; padding: 18px 36px; }
   .sync.on { display: flex; }
-  .sync h3 { margin: 0 0 6px; font-size: 18px; }
-  .sync p { margin: 0 0 14px; color: var(--past); font-size: 14px; }
+  .sync h3 { margin: 0 0 5px; font-size: 18px; }
+  .sync p { margin: 0 0 12px; color: var(--past); font-size: 14px; }
   .sync-list { flex: 1; overflow-y: auto; }
-  .sync-line { padding: 9px 14px; border-radius: 8px; font-size: 19px; color: var(--dim);
+  .sync-line { padding: 8px 13px; border-radius: 8px; font-size: 18px; color: var(--dim);
                display: flex; justify-content: space-between; gap: 20px; }
-  .sync-line.next { background: rgba(255,46,99,.18); color: #fff; }
+  .sync-line.next { background: rgba(255,46,99,.2); color: #fff; }
   .sync-line.set { color: var(--past); }
   .sync-line .tc { font-size: 14px; color: var(--accent); font-variant-numeric: tabular-nums; }
-  .sync-actions { display: flex; gap: 10px; padding-top: 14px; }
+  .sync-actions { display: flex; gap: 10px; padding-top: 12px; }
 
-  .bar { padding: 14px 24px; background: rgba(0,0,0,.3);
+  /* ---------- Нижняя панель ---------- */
+  .bar { padding: 12px 22px; background: rgba(0,0,0,.35);
          border-top: 1px solid rgba(255,255,255,.08);
-         display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+         display: flex; align-items: center; gap: 13px; flex-shrink: 0; }
   .bar.hidden { display: none; }
   .prog { flex: 1; height: 6px; background: rgba(255,255,255,.12); border-radius: 3px; cursor: pointer; }
   .fill { height: 100%; width: 0; border-radius: 3px;
@@ -95,6 +146,8 @@
           border-top-color: var(--accent); border-radius: 50%; display: inline-block;
           animation: sp .8s linear infinite; margin-right: 7px; vertical-align: middle; }
   @keyframes sp { to { transform: rotate(360deg); } }
+
+  body.clean .panel, body.clean .chips, body.clean .bar { display: none; }
 </style>
 </head>
 <body>
@@ -106,8 +159,12 @@
       <input type="file" id="audioFile" accept="audio/*">
     </div>
     <div class="field">
+      <label>Фото исполнителя</label>
+      <input type="file" id="photoFile" accept="image/*">
+    </div>
+    <div class="field">
       <label>Текст песни (по строкам)</label>
-      <textarea id="lyricsInput" placeholder="Вставьте текст песни сюда.&#10;Каждая строка — отдельная строка караоке."></textarea>
+      <textarea id="lyricsInput" placeholder="Вставьте текст песни.&#10;Каждая строка — строка караоке."></textarea>
     </div>
     <div class="field">
       <label>Название</label>
@@ -129,17 +186,23 @@
 
   <div class="chips hidden" id="chips"></div>
 
-  <div class="stage">
-    <div class="meta" id="meta" style="display:none">
-      <div class="t" id="metaTitle"></div>
-      <div id="metaArtist"></div>
+  <div class="stage" id="stage">
+    <div class="zone-photo" id="zonePhoto">
+      <div class="photo-ph">♪</div>
     </div>
 
-    <div class="lyrics" id="lyrics">
-      <div class="hint">
-        1. Выберите трек и вставьте текст песни<br>
-        2. «Авто-синхрон» — тайминги подберутся автоматически<br>
-        3. «Синхрон вручную» — жмите пробел в начале каждой строки (точнее всего)
+    <div class="zone-info">
+      <div class="title" id="zTitle"></div>
+      <div class="divider"></div>
+      <div class="artist" id="zArtist"></div>
+    </div>
+
+    <div class="zone-lyrics" id="zoneLyrics">
+      <div class="lyr-track" id="lyrTrack"></div>
+      <div class="hint" id="hint">
+        1. Выберите трек, фото исполнителя и вставьте текст песни<br>
+        2. «Синхрон вручную» — жмите пробел в начале каждой строки (самый точный способ)<br>
+        3. «Сохранить» — трек попадёт в библиотеку и больше не потребует синхронизации
       </div>
     </div>
 
@@ -162,28 +225,31 @@
     <span class="time" id="tDur">0:00</span>
     <button class="sec" id="btnHook">К хуку</button>
     <button class="sec" id="btnPanel">Настройки</button>
+    <button class="sec" id="btnClean">Показ</button>
+    <button class="sec" id="btnFull">⛶</button>
   </div>
 </div>
 
 <audio id="audio"></audio>
 
 <script>
-const LS_KEY = 'karaoke_lib_v2';
-let lines = [];          // [{ text, start, end, words:[{w,start,end}] }]
-let audioURL = null;
-let curFileKey = null;
-let syncMode = false, syncIdx = 0, syncTimes = [];
+const LS_KEY = 'karaoke_lib_v3';
+let lines = [], audioURL = null, curFileKey = null, photoData = null;
+let syncMode = false, syncIdx = 0, syncTimes = [], lastActive = -1;
 
 const $ = id => document.getElementById(id);
 const audio = $('audio');
-
 const fmt = s => isFinite(s) ? Math.floor(s/60) + ':' + String(Math.floor(s%60)).padStart(2,'0') : '0:00';
 const norm = w => w.toLowerCase().replace(/ё/g,'е').replace(/[^a-zа-я0-9]/g,'');
+const setStatus = (t, err) => { const s = $('status'); s.innerHTML = t; s.className = 'status' + (err ? ' err' : ''); };
 
-/* ---------- Библиотека треков ---------- */
+/* ---------- Библиотека ---------- */
 function lib() { try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch { return {}; } }
 function libSave(key, val) {
-  const l = lib(); l[key] = val; localStorage.setItem(LS_KEY, JSON.stringify(l)); renderChips();
+  const l = lib(); l[key] = val;
+  try { localStorage.setItem(LS_KEY, JSON.stringify(l)); }
+  catch { return setStatus('Память браузера заполнена — удалите старые треки из библиотеки', true); }
+  renderChips(); setStatus('Сохранено в библиотеке ✓');
 }
 function renderChips() {
   const l = lib(), keys = Object.keys(l), box = $('chips');
@@ -197,48 +263,70 @@ function renderChips() {
       if (ev.target.classList.contains('x')) {
         const ll = lib(); delete ll[k]; localStorage.setItem(LS_KEY, JSON.stringify(ll)); renderChips(); return;
       }
-      $('lyricsInput').value = e.lyrics || '';
-      $('titleInput').value = e.title || '';
-      $('artistInput').value = e.artist || '';
-      $('hookInput').value = e.hook || 0;
-      lines = e.lines || [];
-      if (lines.length) { renderLines(); showPlayer(); }
+      loadEntry(e);
       setStatus(audioURL ? 'Загружено из библиотеки ✓' : 'Тайминги загружены — выберите тот же аудиофайл');
     };
     box.appendChild(c);
   });
 }
+function loadEntry(e) {
+  $('lyricsInput').value = e.lyrics || '';
+  $('titleInput').value  = e.title || '';
+  $('artistInput').value = e.artist || '';
+  $('hookInput').value   = e.hook || 0;
+  photoData = e.photo || null;
+  lines = e.lines || [];
+  applyPhoto(); applyMeta();
+  if (lines.length) { renderLines(); showPlayer(); }
+}
 renderChips();
 
-function setStatus(t, err) { const s = $('status'); s.innerHTML = t; s.className = 'status' + (err ? ' err' : ''); }
+/* ---------- Фото ---------- */
+$('photoFile').addEventListener('change', e => {
+  const f = e.target.files[0]; if (!f) return;
+  const img = new Image();
+  img.onload = () => {
+    const max = 620, sc = Math.min(1, max / Math.max(img.width, img.height));
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(img.width * sc); cv.height = Math.round(img.height * sc);
+    cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+    photoData = cv.toDataURL('image/jpeg', .8);
+    applyPhoto();
+    setStatus('Фото загружено ✓');
+  };
+  img.src = URL.createObjectURL(f);
+});
+function applyPhoto() {
+  const z = $('zonePhoto');
+  z.innerHTML = photoData ? `<img src="${photoData}" alt="">` : '<div class="photo-ph">♪</div>';
+}
+function applyMeta() {
+  $('zTitle').textContent  = $('titleInput').value || '';
+  $('zArtist').textContent = $('artistInput').value || '';
+}
+$('titleInput').addEventListener('input', applyMeta);
+$('artistInput').addEventListener('input', applyMeta);
 
-/* ---------- Разбор текста ---------- */
+/* ---------- Разбор и выравнивание ---------- */
 function parseLyrics(raw) {
   return raw.split('\n').map(s => s.trim()).filter(Boolean)
             .map(text => ({ text, words: text.split(/\s+/).map(w => ({ w })) }));
 }
-
-/* ---------- Выравнивание Whisper -> реальный текст ---------- */
 function align(whisperWords, lyricLines, duration) {
   const B = [];
   lyricLines.forEach((ln, li) => ln.words.forEach((wo, wi) => B.push({ n: norm(wo.w), li, wi })));
   const A = whisperWords.map(w => ({ n: norm(w.word), start: w.start, end: w.end })).filter(x => x.n);
-
-  // Наибольшая общая подпоследовательность — устойчива к пропускам и выдумкам Whisper
   const n = A.length, m = B.length;
   const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
   for (let i = 1; i <= n; i++)
     for (let j = 1; j <= m; j++)
       dp[i][j] = A[i-1].n === B[j-1].n ? dp[i-1][j-1] + 1 : Math.max(dp[i-1][j], dp[i][j-1]);
-
   const times = new Array(m).fill(null);
   let i = n, j = m;
   while (i > 0 && j > 0) {
     if (A[i-1].n === B[j-1].n) { times[j-1] = { start: A[i-1].start, end: A[i-1].end }; i--; j--; }
     else if (dp[i-1][j] >= dp[i][j-1]) i--; else j--;
   }
-
-  // Пропуски заполняем интерполяцией между опознанными словами
   const known = times.map((t, k) => t ? k : -1).filter(k => k >= 0);
   if (!known.length) {
     const step = (duration || 180) / m;
@@ -257,125 +345,114 @@ function align(whisperWords, lyricLines, duration) {
       }
     }
   }
-
   B.forEach((b, k) => { const w = lyricLines[b.li].words[b.wi]; w.start = times[k].start; w.end = times[k].end; });
-  lyricLines.forEach(ln => {
-    ln.start = ln.words[0].start;
-    ln.end = ln.words[ln.words.length - 1].end;
-  });
-  const matched = known.length;
-  return { lines: lyricLines, matched, total: m };
+  lyricLines.forEach(ln => { ln.start = ln.words[0].start; ln.end = ln.words[ln.words.length-1].end; });
+  return { lines: lyricLines, matched: known.length, total: m };
 }
 
-/* ---------- Отрисовка ---------- */
+/* ---------- Отрисовка караоке-окна ---------- */
 function renderLines() {
-  const box = $('lyrics'); box.innerHTML = '';
+  $('hint').style.display = 'none';
+  const t = $('lyrTrack'); t.innerHTML = '';
   lines.forEach((ln, i) => {
     const d = document.createElement('div');
     d.className = 'line'; d.dataset.i = i;
     ln.words.forEach(w => {
-      const s = document.createElement('span');
-      s.className = 'w'; s.textContent = w.w; d.appendChild(s);
+      const s = document.createElement('span'); s.className = 'w'; s.textContent = w.w; d.appendChild(s);
     });
     d.onclick = () => { audio.currentTime = ln.start || 0; audio.play(); $('btnPlay').textContent = '⏸'; };
-    box.appendChild(d);
+    t.appendChild(d);
   });
+  lastActive = -1;
+  positionTrack(0);
 }
-
+function positionTrack(idx) {
+  const els = $('lyrTrack').children;
+  if (!els.length) return;
+  const el = els[Math.max(0, Math.min(idx, els.length - 1))];
+  const zoneH = $('zoneLyrics').clientHeight;
+  // активная строка встаёт на ~30% высоты зоны: сверху одна строка, снизу две
+  const y = zoneH * 0.30 - el.offsetTop - el.offsetHeight / 2;
+  $('lyrTrack').style.transform = `translateY(${y}px)`;
+}
 function tick() {
   const t = audio.currentTime;
-  const els = $('lyrics').querySelectorAll('.line');
   let act = -1;
   for (let i = 0; i < lines.length; i++) {
     if (t >= lines[i].start && t <= lines[i].end) { act = i; break; }
     if (t > lines[i].end) act = i;
   }
-  els.forEach((el, i) => {
-    el.className = 'line' + (i === act ? ' active' : (lines[i].end < t ? ' done' : ''));
+  const els = $('lyrTrack').children;
+  for (let i = 0; i < els.length; i++) {
+    const d = Math.abs(i - act);
+    let cls = 'line';
+    if (i === act) cls += ' active';
+    else if (d === 1) cls += ' n1';
+    else if (d === 2) cls += ' n2';
+    els[i].className = cls;
     if (i === act) {
-      el.querySelectorAll('.w').forEach((s, k) => s.classList.toggle('sung', lines[i].words[k].start <= t));
-      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      const ws = els[i].querySelectorAll('.w');
+      for (let k = 0; k < ws.length; k++) ws[k].classList.toggle('sung', lines[i].words[k].start <= t);
     }
-  });
+  }
+  if (act !== lastActive) { positionTrack(act); lastActive = act; }
   $('fill').style.width = ((t / audio.duration) * 100 || 0) + '%';
   $('tCur').textContent = fmt(t);
 }
+window.addEventListener('resize', () => positionTrack(lastActive < 0 ? 0 : lastActive));
+const showPlayer = () => $('bar').classList.remove('hidden');
 
-function showPlayer() { $('bar').classList.remove('hidden'); }
-
-/* ---------- Кнопки ---------- */
+/* ---------- Загрузка трека ---------- */
 $('audioFile').addEventListener('change', () => {
   const f = $('audioFile').files[0]; if (!f) return;
   if (audioURL) URL.revokeObjectURL(audioURL);
   audioURL = URL.createObjectURL(f); audio.src = audioURL;
   curFileKey = f.name + '_' + f.size;
   const saved = lib()[curFileKey];
-  if (saved) {
-    $('lyricsInput').value = saved.lyrics || '';
-    $('titleInput').value = saved.title || '';
-    $('artistInput').value = saved.artist || '';
-    $('hookInput').value = saved.hook || 0;
-    lines = saved.lines || [];
-    if (lines.length) { renderLines(); showPlayer(); setStatus('Найдено в библиотеке — распознавать не нужно ✓'); }
-  } else setStatus('Трек загружен');
-  applyMeta();
+  if (saved) { loadEntry(saved); setStatus('Найдено в библиотеке — синхронизация не нужна ✓'); }
+  else setStatus('Трек загружен');
 });
 
-function applyMeta() {
-  const t = $('titleInput').value, a = $('artistInput').value;
-  if (t || a) { $('meta').style.display = 'block'; $('metaTitle').textContent = t; $('metaArtist').textContent = a; }
-}
-
+/* ---------- Авто-синхрон ---------- */
 $('btnAuto').addEventListener('click', async () => {
-  const f = $('audioFile').files[0];
-  const raw = $('lyricsInput').value.trim();
+  const f = $('audioFile').files[0], raw = $('lyricsInput').value.trim();
   if (!f) return setStatus('Сначала выберите трек', true);
-  if (!raw) return setStatus('Вставьте текст песни — без него Whisper на музыке ошибается', true);
-
+  if (!raw) return setStatus('Вставьте текст песни', true);
   setStatus('<span class="spin"></span>Распознаю и выравниваю...');
   $('btnAuto').disabled = true;
   try {
     const fd = new FormData();
-    fd.append('audio', f);
-    fd.append('lyricsHint', raw.slice(0, 800));
+    fd.append('audio', f); fd.append('lyricsHint', raw.slice(0, 800));
     const r = await fetch('/api/transcribe', { method: 'POST', body: fd });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || 'ошибка сервера');
-
-    const parsed = parseLyrics(raw);
-    const res = align(d.words || [], parsed, d.duration);
+    const res = align(d.words || [], parseLyrics(raw), d.duration);
     lines = res.lines;
     renderLines(); showPlayer(); applyMeta();
     const pct = Math.round(res.matched / res.total * 100);
-    setStatus(`Готово: опознано ${res.matched} из ${res.total} слов (${pct}%). ${pct < 55 ? 'Точность низкая — лучше пройти «Синхрон вручную».' : 'Проверьте по припеву.'}`);
-  } catch (e) {
-    setStatus('Ошибка: ' + e.message, true);
-  } finally { $('btnAuto').disabled = false; }
+    setStatus(`Опознано ${res.matched} из ${res.total} слов (${pct}%). ${pct < 55 ? 'Точность низкая — пройдите «Синхрон вручную».' : 'Проверьте по припеву.'}`);
+  } catch (e) { setStatus('Ошибка: ' + e.message, true); }
+  finally { $('btnAuto').disabled = false; }
 });
 
+/* ---------- Ручная синхронизация ---------- */
 $('btnManual').addEventListener('click', () => {
   const raw = $('lyricsInput').value.trim();
   if (!audioURL) return setStatus('Сначала выберите трек', true);
   if (!raw) return setStatus('Вставьте текст песни', true);
   lines = parseLyrics(raw);
-  startSync();
-});
-
-/* ---------- Ручная синхронизация ---------- */
-function startSync() {
   syncMode = true; syncIdx = 0; syncTimes = [];
   $('sync').classList.add('on');
   renderSyncList();
   audio.currentTime = parseFloat($('hookInput').value) || 0;
-  audio.play(); $('btnPlay').textContent = '⏸';
-  showPlayer();
-}
+  audio.play(); $('btnPlay').textContent = '⏸'; showPlayer();
+});
 function renderSyncList() {
   const box = $('syncList'); box.innerHTML = '';
   lines.forEach((ln, i) => {
     const d = document.createElement('div');
     d.className = 'sync-line' + (i === syncIdx ? ' next' : (syncTimes[i] != null ? ' set' : ''));
-    d.innerHTML = `<span>${ln.text}</span><span class="tc">${syncTimes[i] != null ? fmt(syncTimes[i]) + '.' + String(Math.floor((syncTimes[i]%1)*10)) : ''}</span>`;
+    d.innerHTML = `<span>${ln.text}</span><span class="tc">${syncTimes[i] != null ? fmt(syncTimes[i]) : ''}</span>`;
     box.appendChild(d);
     if (i === syncIdx) d.scrollIntoView({ block: 'center' });
   });
@@ -389,14 +466,14 @@ document.addEventListener('keydown', e => {
   } else if (e.code === 'Backspace') {
     e.preventDefault();
     if (syncIdx > 0) { syncIdx--; syncTimes[syncIdx] = null; renderSyncList(); }
-  } else if (e.code === 'Escape') { exitSync(); }
+  } else if (e.code === 'Escape') exitSync();
 });
 function finishSync() {
   lines.forEach((ln, i) => {
     const st = syncTimes[i];
-    if (st == null) { ln.start = ln.end = 0; return; }
+    if (st == null) { ln.start = ln.end = 0; ln.words.forEach(w => { w.start = 0; w.end = 0; }); return; }
     const nx = syncTimes.slice(i + 1).find(x => x != null);
-    const en = nx != null ? nx : st + Math.max(2, ln.text.length * 0.09);
+    const en = nx != null ? nx : st + Math.max(2, ln.text.length * .09);
     ln.start = st; ln.end = en;
     const total = ln.words.reduce((s, w) => s + w.w.length + 1, 0);
     let acc = st;
@@ -405,9 +482,8 @@ function finishSync() {
       w.start = acc; w.end = acc + dur; acc += dur;
     });
   });
-  exitSync();
-  renderLines(); applyMeta();
-  setStatus('Синхронизация записана ✓ Не забудьте «Сохранить»');
+  exitSync(); renderLines(); applyMeta();
+  setStatus('Синхронизация записана ✓ Нажмите «Сохранить»');
 }
 function exitSync() { syncMode = false; $('sync').classList.remove('on'); audio.pause(); $('btnPlay').textContent = '▶'; }
 $('btnSyncDone').onclick = finishSync;
@@ -417,16 +493,19 @@ $('btnSyncExit').onclick = exitSync;
 /* ---------- Сохранение ---------- */
 $('btnSave').addEventListener('click', () => {
   if (!curFileKey) return setStatus('Сначала выберите трек', true);
-  if (!lines.length) return setStatus('Нечего сохранять — сначала синхронизируйте', true);
+  if (!lines.length) return setStatus('Сначала синхронизируйте текст', true);
   libSave(curFileKey, {
     title: $('titleInput').value, artist: $('artistInput').value,
-    lyrics: $('lyricsInput').value, hook: parseFloat($('hookInput').value) || 0, lines
+    lyrics: $('lyricsInput').value, hook: parseFloat($('hookInput').value) || 0,
+    photo: photoData, lines
   });
-  setStatus('Сохранено в библиотеке ✓');
 });
 
 /* ---------- Плеер ---------- */
-audio.addEventListener('timeupdate', () => { if (!syncMode) tick(); else { $('tCur').textContent = fmt(audio.currentTime); $('fill').style.width = ((audio.currentTime/audio.duration)*100||0)+'%'; } });
+audio.addEventListener('timeupdate', () => {
+  if (!syncMode) tick();
+  else { $('tCur').textContent = fmt(audio.currentTime); $('fill').style.width = ((audio.currentTime/audio.duration)*100||0)+'%'; }
+});
 audio.addEventListener('loadedmetadata', () => $('tDur').textContent = fmt(audio.duration));
 audio.addEventListener('ended', () => $('btnPlay').textContent = '▶');
 $('btnPlay').onclick = () => {
@@ -441,7 +520,21 @@ $('btnHook').onclick = () => {
   audio.currentTime = parseFloat($('hookInput').value) || 0;
   audio.play(); $('btnPlay').textContent = '⏸';
 };
-$('btnPanel').onclick = () => $('panel').classList.toggle('collapsed');
+$('btnPanel').onclick = () => { $('panel').classList.toggle('collapsed'); setTimeout(() => positionTrack(lastActive < 0 ? 0 : lastActive), 60); };
+$('btnClean').onclick = () => {
+  document.body.classList.add('clean');
+  setTimeout(() => positionTrack(lastActive < 0 ? 0 : lastActive), 60);
+};
+document.addEventListener('keydown', e => {
+  if (e.code === 'Escape' && document.body.classList.contains('clean')) {
+    document.body.classList.remove('clean');
+    setTimeout(() => positionTrack(lastActive < 0 ? 0 : lastActive), 60);
+  }
+});
+$('btnFull').onclick = () => {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
+};
 </script>
 </body>
 </html>
