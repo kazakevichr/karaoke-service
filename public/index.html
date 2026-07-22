@@ -5,10 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Музыкальное лото</title>
 <style>
-  :root {
-    --bg:#0d0b1a; --bg2:#171332; --accent:#ff2e63; --accent2:#3b82f6;
-    --dim:#4a4868; --past:#8a87b8; --card:#1e1a3d;
-  }
+  :root { --bg:#0d0b1a; --bg2:#171332; --accent:#ff2e63; --accent2:#3b82f6;
+          --dim:#4a4868; --past:#8a87b8; --card:#1e1a3d; }
   * { box-sizing:border-box; }
   html,body { margin:0; height:100%; overflow:hidden;
     background:radial-gradient(ellipse at 50% 0%, var(--bg2) 0%, var(--bg) 70%);
@@ -16,96 +14,112 @@
   .view { display:none; height:100vh; flex-direction:column; }
   .view.on { display:flex; }
 
-  .top { padding:12px 22px; background:rgba(0,0,0,.35); border-bottom:1px solid rgba(255,255,255,.08);
-         display:flex; gap:12px; align-items:center; flex-wrap:wrap; flex-shrink:0; }
+  .top { padding:12px 20px; background:rgba(0,0,0,.35); border-bottom:1px solid rgba(255,255,255,.08);
+         display:flex; gap:10px; align-items:center; flex-wrap:wrap; flex-shrink:0; }
   .top .sp { flex:1; }
   label.f { font-size:11px; color:var(--past); text-transform:uppercase; letter-spacing:.06em; display:block; margin-bottom:4px; }
   .fld { display:flex; flex-direction:column; }
-  input,textarea,select {
-    background:var(--card); border:1px solid rgba(255,255,255,.15); color:#fff;
+  input,textarea,select { background:var(--card); border:1px solid rgba(255,255,255,.15); color:#fff;
     padding:8px 11px; border-radius:8px; font-size:14px; font-family:inherit; }
   input[type=number]{ width:88px; } select{ cursor:pointer; }
   textarea { resize:vertical; line-height:1.45; }
   button { background:linear-gradient(135deg,var(--accent),#ff5f8f); border:0; color:#fff;
-           padding:10px 17px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
+           padding:10px 16px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
   button.sec { background:rgba(255,255,255,.1); }
   button.gh { background:transparent; border:1px solid rgba(255,255,255,.2); }
+  button.on { background:linear-gradient(135deg,var(--accent2),#60a5fa); }
   button:disabled { opacity:.4; cursor:not-allowed; }
   .status { font-size:13px; color:var(--past); }
   .status.err { color:var(--accent); }
 
-  /* ---------- Сетка чисел ---------- */
-  #gridWrap { flex:1; min-height:0; display:grid; gap:1.1vh 1.1vw; padding:2.4vh 2vw; }
-  .num { display:flex; align-items:center; justify-content:center; border-radius:14px;
-         background:linear-gradient(150deg, rgba(255,255,255,.07), rgba(255,255,255,.02));
+  /* ---------- Сетка ---------- */
+  #gridWrap { flex:1; min-height:0; display:grid; gap:1.1vh 1.1vw; padding:2.2vh 1.8vw; }
+  .num { position:relative; display:flex; flex-direction:column; align-items:center; justify-content:center;
+         border-radius:14px; background:linear-gradient(150deg, rgba(255,255,255,.07), rgba(255,255,255,.02));
          border:1px solid rgba(255,255,255,.09); font-weight:800; cursor:pointer;
-         transition:transform .15s, background .2s, color .2s; color:#fff; min-height:0; }
+         transition:transform .15s, background .2s, color .2s; color:#fff; min-height:0; overflow:hidden; }
   .num:hover { transform:translateY(-3px); background:linear-gradient(150deg, rgba(255,46,99,.4), rgba(255,46,99,.12)); }
   .num.empty { color:var(--dim); background:rgba(255,255,255,.02); border-style:dashed; cursor:default; }
   .num.empty:hover { transform:none; background:rgba(255,255,255,.02); }
+  body.assign .num.empty { cursor:pointer; }
+  body.assign .num.empty:hover { transform:translateY(-3px); background:rgba(59,130,246,.25); }
   .num.played { color:var(--dim); background:rgba(255,255,255,.02); }
-  .num.played::after { content:''; position:absolute; }
-  .num.played span { position:relative; }
-  .num.played span::after { content:''; position:absolute; left:-8%; right:-8%; top:48%; height:6%;
-                            background:var(--accent); border-radius:3px; }
+  .num.played .d span { position:relative; }
+  .num.played .d span::after { content:''; position:absolute; left:-8%; right:-8%; top:48%; height:6%;
+                               background:var(--accent); border-radius:3px; }
   .num.last { box-shadow:0 0 0 3px var(--accent), 0 0 40px rgba(255,46,99,.5); }
+  .num .cap { font-size:1.5vh; font-weight:600; color:var(--past); margin-top:.6vh;
+              padding:0 .5vw; text-align:center; line-height:1.25; max-height:4vh; overflow:hidden; display:none; }
+  body.assign .num .cap { display:block; }
 
-  /* ---------- Экран трека ---------- */
+  /* ---------- Плеер ---------- */
   .stage { flex:1; min-height:0; display:grid;
-           grid-template-columns:40% 60%; grid-template-rows:44% 56%; position:relative; }
+           grid-template-columns:40% 60%; grid-template-rows:52% 48%; position:relative; }
   .zone-photo { grid-row:1; grid-column:1; display:flex; align-items:center; justify-content:center;
-                padding:3vh 2vw 2vh 3vw; min-height:0; }
+                padding:2.4vh 1.6vw 1.8vh 2.4vw; min-height:0; }
   .zone-photo img { max-width:100%; max-height:100%; object-fit:contain; border-radius:18px;
                     box-shadow:0 18px 60px rgba(0,0,0,.65), 0 0 0 1px rgba(255,255,255,.08); }
-  .photo-ph { width:78%; aspect-ratio:1; border-radius:18px;
+  .photo-ph { width:84%; aspect-ratio:1; border-radius:18px;
               background:linear-gradient(145deg,#241f4d,#16123a); border:1px dashed rgba(255,255,255,.14);
-              display:flex; align-items:center; justify-content:center; font-size:8vh; color:rgba(255,255,255,.13); }
+              display:flex; align-items:center; justify-content:center; font-size:9vh; color:rgba(255,255,255,.13); }
   .zone-info { grid-row:1; grid-column:2; display:flex; flex-direction:column; justify-content:center;
-               padding:3vh 4vw 2vh 2vw; min-height:0; gap:1.4vh; }
-  .zone-info .title { font-size:7vh; font-weight:800; line-height:1.05; letter-spacing:-.02em;
+               padding:2.4vh 3.5vw 1.8vh 1.6vw; min-height:0; gap:1.6vh; position:relative; }
+  .zone-info .title { font-size:8.6vh; font-weight:800; line-height:1.03; letter-spacing:-.02em;
                       text-shadow:0 4px 40px rgba(255,46,99,.35); overflow-wrap:break-word; }
-  .zone-info .artist { font-size:4vh; font-weight:600; color:var(--accent);
-                       text-transform:uppercase; letter-spacing:.06em; }
-  .zone-info .divider { width:90px; height:4px; border-radius:2px;
+  .zone-info .artist { font-size:4.8vh; font-weight:600; color:var(--accent);
+                       text-transform:uppercase; letter-spacing:.06em; line-height:1.1; }
+  .zone-info .divider { width:110px; height:5px; border-radius:3px;
                         background:linear-gradient(90deg,var(--accent),var(--accent2)); }
-  .zone-info .badge { position:absolute; top:2vh; right:2vw; font-size:3vh; font-weight:800;
-                      color:var(--dim); }
+  .zone-info .badge { position:absolute; top:1.6vh; right:2vw; font-size:3.4vh; font-weight:800; color:var(--dim); }
   .zone-lyrics { grid-row:2; grid-column:1/-1; position:relative; overflow:hidden;
                  border-top:1px solid rgba(255,255,255,.07);
                  background:linear-gradient(180deg, rgba(255,255,255,.02), transparent); }
-  .lyr-track { position:absolute; left:0; right:0; top:0; padding:0 5vw; text-align:center;
+  .lyr-track { position:absolute; left:0; right:0; top:0; padding:0 4vw; text-align:center;
                transition:transform .45s cubic-bezier(.4,0,.2,1); }
-  .line { font-size:5.2vh; font-weight:700; line-height:1.35; padding:.5vh 0; color:var(--dim);
+  .line { font-size:6.5vh; font-weight:700; line-height:1.3; padding:.4vh 0; color:var(--dim);
           opacity:0; transition:color .3s, opacity .35s, transform .35s; }
-  .line.n2 { opacity:.22; } .line.n1 { opacity:.45; color:var(--past); }
-  .line.active { opacity:1; transform:scale(1.05); }
-  .line .w { display:inline-block; margin:0 .28em; color:inherit; }
+  .line.n2 { opacity:.2; } .line.n1 { opacity:.44; color:var(--past); }
+  .line.active { opacity:1; transform:scale(1.04); }
+  .line .w { display:inline-block; margin:0 .26em; color:inherit; }
   .line.active .w { color:var(--past); transition:color .12s, text-shadow .12s; }
-  .line.active .w.sung { color:#fff; text-shadow:0 0 22px var(--accent), 0 0 48px rgba(255,46,99,.5); }
+  .line.active .w.sung { color:#fff; text-shadow:0 0 24px var(--accent), 0 0 52px rgba(255,46,99,.5); }
 
-  .bar { padding:12px 22px; background:rgba(0,0,0,.35); border-top:1px solid rgba(255,255,255,.08);
-         display:flex; align-items:center; gap:12px; flex-shrink:0; }
+  .bar { padding:12px 20px; background:rgba(0,0,0,.35); border-top:1px solid rgba(255,255,255,.08);
+         display:flex; align-items:center; gap:10px; flex-shrink:0; }
   .prog { flex:1; height:6px; background:rgba(255,255,255,.12); border-radius:3px; cursor:pointer; }
   .fill { height:100%; width:0; border-radius:3px; background:linear-gradient(90deg,var(--accent),var(--accent2)); }
   .time { font-size:13px; color:var(--past); min-width:44px; font-variant-numeric:tabular-nums; }
 
-  /* ---------- Библиотека ---------- */
-  .libwrap { flex:1; min-height:0; display:grid; grid-template-columns:320px 1fr; }
+  /* ---------- Банк ---------- */
+  .libwrap { flex:1; min-height:0; display:grid; grid-template-columns:330px 1fr; }
   .liblist { border-right:1px solid rgba(255,255,255,.08); overflow-y:auto; padding:12px; }
   .libitem { padding:10px 12px; border-radius:9px; cursor:pointer; display:flex; gap:10px; align-items:center;
              margin-bottom:6px; background:rgba(255,255,255,.03); }
   .libitem:hover { background:rgba(255,255,255,.08); }
   .libitem.sel { background:rgba(255,46,99,.22); }
-  .libitem .n { width:34px; height:34px; flex-shrink:0; border-radius:8px; background:var(--card);
-                display:flex; align-items:center; justify-content:center; font-weight:800; font-size:14px; }
+  .libitem .ic { width:34px; height:34px; flex-shrink:0; border-radius:8px; background:var(--card);
+                 display:flex; align-items:center; justify-content:center; font-size:15px; }
   .libitem .tt { font-size:14px; line-height:1.3; overflow:hidden; }
   .libitem .tt small { color:var(--past); display:block; font-size:12px; }
   .libedit { overflow-y:auto; padding:18px 22px; }
-  .row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
-  .row .fld { flex:0 0 auto; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px; align-items:flex-end; }
   .full { width:100%; }
+  .usedin { font-size:12px; color:var(--past); }
 
-  .sync { position:fixed; inset:0; background:rgba(8,6,20,.97); z-index:50; display:none;
+  /* ---------- Модалки ---------- */
+  .modal { position:fixed; inset:0; background:rgba(8,6,20,.9); z-index:60; display:none;
+           align-items:center; justify-content:center; padding:5vh 5vw; }
+  .modal.on { display:flex; }
+  .mbox { background:#141030; border:1px solid rgba(255,255,255,.12); border-radius:16px;
+          width:100%; max-width:720px; max-height:100%; display:flex; flex-direction:column; padding:20px; }
+  .mbox h3 { margin:0 0 12px; }
+  .mlist { flex:1; overflow-y:auto; margin:12px 0; }
+  .mrow { padding:11px 13px; border-radius:9px; cursor:pointer; display:flex; gap:12px; align-items:center;
+          background:rgba(255,255,255,.03); margin-bottom:6px; }
+  .mrow:hover { background:rgba(255,46,99,.22); }
+  .mrow .tt small { color:var(--past); display:block; font-size:12px; }
+
+  .sync { position:fixed; inset:0; background:rgba(8,6,20,.97); z-index:70; display:none;
           flex-direction:column; padding:18px 36px; }
   .sync.on { display:flex; }
   .sync h3 { margin:0 0 5px; } .sync p { margin:0 0 12px; color:var(--past); font-size:14px; }
@@ -124,30 +138,26 @@
 </head>
 <body>
 
-<!-- ================= ИГРОВАЯ СЕТКА ================= -->
+<!-- ============ ИГРА ============ -->
 <div class="view on" id="vGrid">
   <div class="top">
-    <div class="fld">
-      <label class="f">Коллекция</label>
-      <select id="gCollection"></select>
-    </div>
-    <div class="fld">
-      <label class="f">Чисел</label>
-      <select id="gSize">
-        <option>20</option><option>30</option><option>40</option><option>50</option><option selected>60</option>
-      </select>
+    <div class="fld"><label class="f">Коллекция</label><select id="gCollection"></select></div>
+    <div class="fld"><label class="f">Чисел</label>
+      <select id="gSize"><option>20</option><option>30</option><option>40</option><option>50</option><option selected>60</option></select>
     </div>
     <button class="sec" id="btnRandom">Случайное число</button>
-    <button class="gh" id="btnResetPlayed">Сбросить отметки</button>
+    <button class="gh" id="btnUndo">Сбросить последнюю</button>
+    <button class="gh" id="btnResetPlayed">Сбросить все</button>
+    <button class="sec" id="btnAssign">Расставить треки</button>
     <div class="sp"></div>
     <span class="status" id="gStatus"></span>
-    <button class="sec" id="btnToLib">Библиотека</button>
+    <button class="sec" id="btnToLib">Банк треков</button>
     <button class="gh" id="btnFullG">⛶</button>
   </div>
   <div id="gridWrap"></div>
 </div>
 
-<!-- ================= ЭКРАН ТРЕКА ================= -->
+<!-- ============ ПЛЕЕР ============ -->
 <div class="view" id="vPlay">
   <div class="stage">
     <div class="zone-photo" id="zonePhoto"><div class="photo-ph">♪</div></div>
@@ -163,6 +173,7 @@
     <button class="sec" id="btnBack">← К числам</button>
     <button id="btnPlay">▶</button>
     <button class="sec" id="btnHook">↻ Припев</button>
+    <button class="sec" id="btnStart">⏮ С начала</button>
     <span class="time" id="tCur">0:00</span>
     <div class="prog" id="prog"><div class="fill" id="fill"></div></div>
     <span class="time" id="tDur">0:00</span>
@@ -170,43 +181,38 @@
   </div>
 </div>
 
-<!-- ================= БИБЛИОТЕКА ================= -->
+<!-- ============ БАНК ТРЕКОВ ============ -->
 <div class="view" id="vLib">
   <div class="top">
-    <div class="fld">
-      <label class="f">Коллекция</label>
-      <select id="lCollection"></select>
-    </div>
-    <button class="sec" id="btnNewColl">+ Коллекция</button>
-    <button id="btnNewTrack">+ Трек</button>
+    <button id="btnNewTrack">+ Новый трек</button>
+    <div class="fld"><label class="f">Поиск</label><input type="text" id="libSearch" placeholder="название или исполнитель" style="width:240px"></div>
     <div class="sp"></div>
     <span class="status" id="lStatus"></span>
     <button class="sec" id="btnToGrid">К игре</button>
   </div>
   <div class="libwrap">
     <div class="liblist" id="libList"></div>
-    <div class="libedit" id="libEdit">
+    <div class="libedit">
       <div class="row">
-        <div class="fld"><label class="f">Номер</label><input type="number" id="eNumber" min="1" max="60"></div>
-        <div class="fld"><label class="f">Название</label><input type="text" id="eTitle" style="width:220px"></div>
-        <div class="fld"><label class="f">Исполнитель</label><input type="text" id="eArtist" style="width:200px"></div>
+        <div class="fld"><label class="f">Название</label><input type="text" id="eTitle" style="width:260px"></div>
+        <div class="fld"><label class="f">Исполнитель</label><input type="text" id="eArtist" style="width:230px"></div>
         <div class="fld"><label class="f">Припев с (сек)</label><input type="number" id="eHook" min="0" step="1" value="0"></div>
       </div>
       <div class="row">
         <div class="fld"><label class="f">Аудиофайл</label><input type="file" id="eAudio" accept="audio/*"></div>
         <div class="fld"><label class="f">Фото исполнителя</label><input type="file" id="ePhoto" accept="image/*"></div>
-        <div class="fld"><label class="f">Коллекция трека</label><select id="eColl"></select></div>
       </div>
+      <div class="row"><div class="usedin" id="eUsedIn"></div></div>
       <div class="row">
         <div class="fld full"><label class="f">Текст песни (по строкам)</label>
-          <textarea id="eLyrics" class="full" style="height:150px"></textarea></div>
+          <textarea id="eLyrics" class="full" style="height:170px"></textarea></div>
       </div>
       <div class="row">
         <button id="btnAuto">Авто-синхрон</button>
         <button class="sec" id="btnManual">Синхрон вручную</button>
         <button class="sec" id="btnPreview">Проверить</button>
         <div class="sp"></div>
-        <button id="btnSaveTrack">Сохранить трек</button>
+        <button id="btnSaveTrack">Сохранить в банк</button>
         <button class="gh" id="btnDelTrack">Удалить</button>
       </div>
       <div class="status" id="eStatus"></div>
@@ -214,7 +220,21 @@
   </div>
 </div>
 
-<!-- ================= РУЧНАЯ СИНХРОНИЗАЦИЯ ================= -->
+<!-- ============ ВЫБОР ТРЕКА НА ЧИСЛО ============ -->
+<div class="modal" id="picker">
+  <div class="mbox">
+    <h3 id="pickTitle">Трек на число</h3>
+    <input type="text" id="pickSearch" placeholder="Поиск по названию или исполнителю">
+    <div class="mlist" id="pickList"></div>
+    <div class="row" style="margin:0">
+      <button class="gh" id="pickClear">Убрать трек с числа</button>
+      <div class="sp"></div>
+      <button class="sec" id="pickClose">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ СИНХРОНИЗАЦИЯ ============ -->
 <div class="sync" id="sync">
   <h3>Ручная синхронизация</h3>
   <p>Играет трек. Нажимайте <b>пробел</b> в начале каждой строки. <b>Backspace</b> — отменить последнюю. <b>Esc</b> — выйти.</p>
@@ -229,7 +249,7 @@
 <audio id="audio"></audio>
 
 <script>
-/* ================= ХРАНИЛИЩЕ ================= */
+/* ========== БД: банк треков ========== */
 const DBN='karaoke_db', STORE='tracks';
 function idb(){return new Promise((res,rej)=>{const r=indexedDB.open(DBN,1);
   r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains(STORE))r.result.createObjectStore(STORE,{keyPath:'id'});};
@@ -241,15 +261,20 @@ async function dbPut(o){const d=await idb();return new Promise((res,rej)=>{const
 async function dbDel(id){const d=await idb();return new Promise((res,rej)=>{const t=d.transaction(STORE,'readwrite');
   t.objectStore(STORE).delete(id); t.oncomplete=()=>res(); t.onerror=()=>rej(t.error);});}
 
-const SET='karaoke_settings';
-const settings = Object.assign({ collection:'Общая', size:60, played:{} }, JSON.parse(localStorage.getItem(SET)||'{}'));
+/* ========== Настройки и коллекции ==========
+   collections: { "Хиты 90-х": { "7": trackId, "23": trackId } }
+   один и тот же trackId может стоять в любом числе любой коллекции  */
+const SET='karaoke_settings_v2';
+const settings = Object.assign(
+  { collection:'Общая', size:60, played:{}, history:{}, collections:{ 'Общая':{} } },
+  JSON.parse(localStorage.getItem(SET)||'{}'));
 const saveSettings = () => localStorage.setItem(SET, JSON.stringify(settings));
 
-let tracks = [];            // все треки из БД
-let editing = null;         // редактируемый трек
-let lines = [];             // тайминги текущего экрана трека
-let curURL = null, curPhotoURL = null, lastActive = -1;
-let syncMode = false, syncIdx = 0, syncTimes = [], syncLines = [];
+let bank = [];              // все треки
+let editing = null;         // редактируемый трек банка
+let lines = [], curURL=null, curPhotoURL=null, lastActive=-1;
+let assignMode = false, pickNumber = null;
+let syncMode=false, syncIdx=0, syncTimes=[], syncLines=[];
 
 const $ = id => document.getElementById(id);
 const audio = $('audio');
@@ -257,107 +282,149 @@ const fmt = s => isFinite(s) ? Math.floor(s/60)+':'+String(Math.floor(s%60)).pad
 const norm = w => w.toLowerCase().replace(/ё/g,'е').replace(/[^a-zа-я0-9]/g,'');
 const uid = () => Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 const say = (el,t,err) => { const e=$(el); e.innerHTML=t; e.className='status'+(err?' err':''); };
+const trackById = id => bank.find(t=>t.id===id);
+const show = v => ['vGrid','vPlay','vLib'].forEach(x=>$(x).classList.toggle('on', x===v));
 
-/* ================= НАВИГАЦИЯ ================= */
-function show(v){ ['vGrid','vPlay','vLib'].forEach(x=>$(x).classList.toggle('on', x===v)); }
-
-/* ================= КОЛЛЕКЦИИ ================= */
-function collections(){
-  const s = new Set(tracks.map(t=>t.collection||'Общая'));
-  s.add(settings.collection||'Общая'); s.add('Общая');
-  return [...s].sort();
-}
-function fillSelects(){
-  const list = collections();
-  [['gCollection',settings.collection],['lCollection',settings.collection],['eColl',editing?editing.collection:settings.collection]]
-    .forEach(([id,val])=>{
-      const el=$(id); el.innerHTML='';
-      list.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; el.appendChild(o); });
-      el.value = val || 'Общая';
-    });
+function coll(name){ name=name||settings.collection;
+  settings.collections[name]=settings.collections[name]||{}; return settings.collections[name]; }
+function collNames(){ const s=new Set(Object.keys(settings.collections)); s.add('Общая'); return [...s].sort(); }
+function fillCollSelect(){
+  const el=$('gCollection'); el.innerHTML='';
+  collNames().forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; el.appendChild(o); });
+  const extra=document.createElement('option'); extra.value='__new'; extra.textContent='+ Новая коллекция...'; el.appendChild(extra);
+  el.value=settings.collection;
 }
 
-/* ================= СЕТКА ================= */
+/* ========== СЕТКА ========== */
 function renderGrid(){
-  const size = +settings.size;
+  const size=+settings.size;
   const cols = size<=20?5 : size<=30?6 : size<=40?8 : 10;
-  const wrap = $('gridWrap');
-  wrap.style.gridTemplateColumns = `repeat(${cols},1fr)`;
-  wrap.style.gridTemplateRows = `repeat(${Math.ceil(size/cols)},1fr)`;
+  const wrap=$('gridWrap');
+  wrap.style.gridTemplateColumns=`repeat(${cols},1fr)`;
+  wrap.style.gridTemplateRows=`repeat(${Math.ceil(size/cols)},1fr)`;
   wrap.innerHTML='';
-  const inColl = tracks.filter(t=>(t.collection||'Общая')===settings.collection);
-  const byNum = {}; inColl.forEach(t=>{ if(t.number) byNum[t.number]=t; });
-  const played = settings.played[settings.collection]||{};
+  const map=coll(), played=settings.played[settings.collection]||{};
   for(let i=1;i<=size;i++){
+    const tid=map[i], t=tid?trackById(tid):null;
     const d=document.createElement('div');
-    const has = !!byNum[i];
-    d.className='num'+(has?'':' empty')+(played[i]?' played':'');
-    d.style.fontSize = size<=20?'7vh' : size<=30?'6vh' : size<=40?'5vh':'4.2vh';
-    d.innerHTML=`<span>${i}</span>`;
-    if(has) d.onclick=()=>openTrack(byNum[i]);
+    d.className='num'+(t?'':' empty')+(played[i]?' played':'');
+    const fs = size<=20?'6.4vh' : size<=30?'5.4vh' : size<=40?'4.6vh':'3.9vh';
+    d.innerHTML=`<div class="d" style="font-size:${fs}"><span>${i}</span></div>`+
+                `<div class="cap">${t?(t.title||'без названия'):'—'}</div>`;
+    d.onclick=()=>{ if(assignMode) openPicker(i); else if(t) openTrack(t,i); };
     wrap.appendChild(d);
   }
-  const cnt = Object.keys(byNum).length;
-  say('gStatus', `${cnt} треков в коллекции «${settings.collection}»`);
+  const cnt=Object.values(map).filter(Boolean).length;
+  say('gStatus', `${cnt} треков расставлено • ${bank.length} в банке`);
 }
-$('gCollection').onchange = e => { settings.collection=e.target.value; saveSettings(); renderGrid(); };
-$('gSize').onchange = e => { settings.size=+e.target.value; saveSettings(); renderGrid(); };
-$('btnResetPlayed').onclick = () => { settings.played[settings.collection]={}; saveSettings(); renderGrid(); };
-$('btnRandom').onclick = () => {
-  const played = settings.played[settings.collection]||{};
-  const avail = tracks.filter(t=>(t.collection||'Общая')===settings.collection && t.number && !played[t.number]);
-  if(!avail.length) return say('gStatus','Все треки этой коллекции уже сыграны', true);
-  const t = avail[Math.floor(Math.random()*avail.length)];
-  const el = $('gridWrap').children[t.number-1];
-  [...$('gridWrap').children].forEach(c=>c.classList.remove('last'));
-  if(el){ el.classList.add('last'); el.scrollIntoView({block:'center'}); }
-  say('gStatus', `Выпало число ${t.number}`);
+$('gCollection').onchange = e => {
+  if(e.target.value==='__new'){
+    const n=prompt('Название коллекции (например: Хиты 90-х)');
+    if(n){ settings.collections[n]=settings.collections[n]||{}; settings.collection=n; saveSettings(); }
+    fillCollSelect(); renderGrid(); return;
+  }
+  settings.collection=e.target.value; saveSettings(); renderGrid();
 };
-$('btnToLib').onclick = () => { show('vLib'); renderLib(); ensureEditing(); };
-$('btnToGrid').onclick = () => { show('vGrid'); renderGrid(); };
-$('btnFullG').onclick = $('btnFullP') ? toggleFull : null;
+$('gSize').onchange = e => { settings.size=+e.target.value; saveSettings(); renderGrid(); };
+$('btnAssign').onclick = () => {
+  assignMode=!assignMode;
+  document.body.classList.toggle('assign', assignMode);
+  $('btnAssign').classList.toggle('on', assignMode);
+  $('btnAssign').textContent = assignMode?'Готово':'Расставить треки';
+  say('gStatus', assignMode?'Нажмите на число, чтобы назначить трек':'');
+  renderGrid();
+};
+$('btnResetPlayed').onclick = () => {
+  settings.played[settings.collection]={}; settings.history[settings.collection]=[];
+  saveSettings(); renderGrid();
+};
+$('btnUndo').onclick = () => {
+  const h=settings.history[settings.collection]||[];
+  if(!h.length) return say('gStatus','Нечего отменять', true);
+  const n=h.pop();
+  if(settings.played[settings.collection]) delete settings.played[settings.collection][n];
+  saveSettings(); renderGrid(); say('gStatus',`Отметка с числа ${n} снята`);
+};
+$('btnRandom').onclick = () => {
+  const map=coll(), played=settings.played[settings.collection]||{};
+  const avail=Object.keys(map).filter(n=>map[n]&&!played[n]);
+  if(!avail.length) return say('gStatus','Все треки коллекции уже сыграны', true);
+  const n=avail[Math.floor(Math.random()*avail.length)];
+  [...$('gridWrap').children].forEach(c=>c.classList.remove('last'));
+  const el=$('gridWrap').children[n-1];
+  if(el){ el.classList.add('last'); el.scrollIntoView({block:'center'}); }
+  say('gStatus',`Выпало число ${n}`);
+};
+$('btnToLib').onclick = () => { show('vLib'); ensureEditing(); renderLib(); };
+$('btnToGrid').onclick = () => { show('vGrid'); fillCollSelect(); renderGrid(); };
 function toggleFull(){ if(!document.fullscreenElement) document.documentElement.requestFullscreen(); else document.exitFullscreen(); }
-$('btnFullG').onclick = toggleFull;
-$('btnFullP').onclick = toggleFull;
+$('btnFullG').onclick=toggleFull; $('btnFullP').onclick=toggleFull;
 
-/* ================= ЭКРАН ТРЕКА ================= */
-async function openTrack(t){
+/* ========== ВЫБОР ТРЕКА НА ЧИСЛО ========== */
+function openPicker(n){
+  pickNumber=n;
+  $('pickTitle').textContent=`Какой трек ставим на число ${n}?`;
+  $('pickSearch').value=''; renderPick(); $('picker').classList.add('on'); $('pickSearch').focus();
+}
+function renderPick(){
+  const q=$('pickSearch').value.toLowerCase().trim();
+  const box=$('pickList'); box.innerHTML='';
+  const list=bank.filter(t=>!q || (t.title||'').toLowerCase().includes(q) || (t.artist||'').toLowerCase().includes(q));
+  if(!list.length) box.innerHTML='<div style="color:#4a4868;padding:12px">В банке нет подходящих треков. Добавьте их в разделе «Банк треков».</div>';
+  list.forEach(t=>{
+    const where=collNames().filter(c=>Object.values(settings.collections[c]||{}).includes(t.id));
+    const d=document.createElement('div'); d.className='mrow';
+    d.innerHTML=`<div class="ic">${t.lines&&t.lines.length?'✓':'♪'}</div>
+      <div class="tt">${t.title||'Без названия'}<small>${t.artist||''}${where.length?' • уже в: '+where.join(', '):''}</small></div>`;
+    d.onclick=()=>{ coll()[pickNumber]=t.id; saveSettings(); $('picker').classList.remove('on'); renderGrid(); };
+    box.appendChild(d);
+  });
+}
+$('pickSearch').oninput=renderPick;
+$('pickClear').onclick=()=>{ delete coll()[pickNumber]; saveSettings(); $('picker').classList.remove('on'); renderGrid(); };
+$('pickClose').onclick=()=>$('picker').classList.remove('on');
+
+/* ========== ПЛЕЕР ========== */
+async function openTrack(t, number){
   show('vPlay');
-  lines = t.lines||[]; lastActive=-1;
-  $('zTitle').textContent = t.title||'';
-  $('zArtist').textContent = t.artist||'';
-  $('zBadge').textContent = t.number ? '№'+t.number : '';
+  lines=t.lines||[]; lastActive=-1;
+  $('zTitle').textContent=t.title||''; $('zArtist').textContent=t.artist||'';
+  $('zBadge').textContent = number?'№'+number:'';
   if(curPhotoURL){ URL.revokeObjectURL(curPhotoURL); curPhotoURL=null; }
-  $('zonePhoto').innerHTML = '<div class="photo-ph">♪</div>';
+  $('zonePhoto').innerHTML='<div class="photo-ph">♪</div>';
   if(t.photo){ curPhotoURL=URL.createObjectURL(t.photo); $('zonePhoto').innerHTML=`<img src="${curPhotoURL}">`; }
   if(curURL) URL.revokeObjectURL(curURL);
-  curURL = URL.createObjectURL(t.audio);
-  audio.src = curURL;
+  curURL=URL.createObjectURL(t.audio); audio.src=curURL;
   renderLines();
-  audio.currentTime = 0;
-  const hook = +t.hook||0;
+  const hook=+t.hook||0; window.__hook=hook;
   audio.addEventListener('loadedmetadata', function once(){
     audio.removeEventListener('loadedmetadata', once);
-    audio.currentTime = hook; audio.play(); $('btnPlay').textContent='⏸';
+    audio.currentTime=hook; audio.play(); $('btnPlay').textContent='⏸';
   });
-  // отметка «сыграно»
-  if(t.number){ settings.played[settings.collection]=settings.played[settings.collection]||{};
-    settings.played[settings.collection][t.number]=true; saveSettings(); }
-  window.__curHook = hook;
+  if(number){
+    settings.played[settings.collection]=settings.played[settings.collection]||{};
+    settings.history[settings.collection]=settings.history[settings.collection]||[];
+    if(!settings.played[settings.collection][number]){
+      settings.played[settings.collection][number]=true;
+      settings.history[settings.collection].push(number);
+    }
+    saveSettings();
+  }
 }
-$('btnBack').onclick = () => { audio.pause(); $('btnPlay').textContent='▶'; show('vGrid'); renderGrid(); };
-$('btnHook').onclick = () => { audio.currentTime = window.__curHook||0; audio.play(); $('btnPlay').textContent='⏸'; };
-$('btnPlay').onclick = () => { if(audio.paused){audio.play();$('btnPlay').textContent='⏸';} else {audio.pause();$('btnPlay').textContent='▶';} };
-$('prog').onclick = e => { const r=$('prog').getBoundingClientRect(); audio.currentTime=((e.clientX-r.left)/r.width)*audio.duration; };
+$('btnBack').onclick=()=>{ audio.pause(); $('btnPlay').textContent='▶'; show('vGrid'); renderGrid(); };
+$('btnHook').onclick=()=>{ audio.currentTime=window.__hook||0; audio.play(); $('btnPlay').textContent='⏸'; };
+$('btnStart').onclick=()=>{ audio.currentTime=0; audio.play(); $('btnPlay').textContent='⏸'; };
+$('btnPlay').onclick=()=>{ if(audio.paused){audio.play();$('btnPlay').textContent='⏸';} else {audio.pause();$('btnPlay').textContent='▶';} };
+$('prog').onclick=e=>{ const r=$('prog').getBoundingClientRect(); audio.currentTime=((e.clientX-r.left)/r.width)*audio.duration; };
 document.addEventListener('keydown', e=>{
-  if(syncMode) return;
-  if(!$('vPlay').classList.contains('on')) return;
-  if(e.code==='Escape'){ $('btnBack').click(); }
-  if(e.code==='KeyR'){ $('btnHook').click(); }
+  if(syncMode || !$('vPlay').classList.contains('on')) return;
+  if(e.code==='Escape') $('btnBack').click();
+  if(e.code==='KeyR') $('btnHook').click();
+  if(e.code==='KeyS') $('btnStart').click();
   if(e.code==='Space'){ e.preventDefault(); $('btnPlay').click(); }
 });
 
-/* ================= КАРАОКЕ ================= */
+/* ========== КАРАОКЕ ========== */
 function renderLines(){
   const t=$('lyrTrack'); t.innerHTML='';
   lines.forEach((ln,i)=>{
@@ -371,7 +438,7 @@ function renderLines(){
 function positionTrack(idx){
   const els=$('lyrTrack').children; if(!els.length) return;
   const el=els[Math.max(0,Math.min(idx,els.length-1))];
-  const y = $('zoneLyrics').clientHeight*0.30 - el.offsetTop - el.offsetHeight/2;
+  const y=$('zoneLyrics').clientHeight*0.30 - el.offsetTop - el.offsetHeight/2;
   $('lyrTrack').style.transform=`translateY(${y}px)`;
 }
 function tick(){
@@ -393,96 +460,85 @@ audio.addEventListener('loadedmetadata', ()=>$('tDur').textContent=fmt(audio.dur
 audio.addEventListener('ended', ()=>$('btnPlay').textContent='▶');
 window.addEventListener('resize', ()=>positionTrack(lastActive<0?0:lastActive));
 
-/* ================= БИБЛИОТЕКА ================= */
+/* ========== БАНК ТРЕКОВ ========== */
 function renderLib(){
-  fillSelects();
+  const q=$('libSearch').value.toLowerCase().trim();
   const box=$('libList'); box.innerHTML='';
-  const list = tracks.filter(t=>(t.collection||'Общая')===$('lCollection').value)
-                     .sort((a,b)=>(a.number||999)-(b.number||999));
-  if(!list.length) box.innerHTML='<div style="color:#4a4868;font-size:14px;padding:10px">Пусто. Нажмите «+ Трек».</div>';
+  const list=bank.filter(t=>!q||(t.title||'').toLowerCase().includes(q)||(t.artist||'').toLowerCase().includes(q))
+                 .sort((a,b)=>(a.title||'').localeCompare(b.title||''));
+  if(!list.length) box.innerHTML='<div style="color:#4a4868;font-size:14px;padding:10px">Банк пуст. Нажмите «+ Новый трек».</div>';
   list.forEach(t=>{
     const d=document.createElement('div');
     d.className='libitem'+(editing&&editing.id===t.id?' sel':'');
-    d.innerHTML=`<div class="n">${t.number||'—'}</div><div class="tt">${t.title||'Без названия'}
-      <small>${t.artist||''} ${t.lines&&t.lines.length?'• синхронизирован':'• без текста'}</small></div>`;
+    const used=collNames().filter(c=>Object.values(settings.collections[c]||{}).includes(t.id));
+    d.innerHTML=`<div class="ic">${t.lines&&t.lines.length?'✓':'♪'}</div>
+      <div class="tt">${t.title||'Без названия'}<small>${t.artist||''}${used.length?' • '+used.join(', '):' • не расставлен'}</small></div>`;
     d.onclick=()=>loadEditor(t);
     box.appendChild(d);
   });
+  say('lStatus', `${bank.length} треков в банке`);
 }
-$('lCollection').onchange = () => renderLib();
-$('btnNewColl').onclick = () => {
-  const name = prompt('Название коллекции (например: Хиты 90-х)');
-  if(!name) return;
-  settings.collection = name; saveSettings();
-  editing = { id:uid(), collection:name, number:null, title:'', artist:'', hook:0, lyrics:'', lines:[], audio:null, photo:null };
-  fillSelects(); $('lCollection').value=name; loadEditor(editing); renderLib();
-};
-$('btnNewTrack').onclick = () => {
-  editing = { id:uid(), collection:$('lCollection').value, number:nextFreeNumber(), title:'', artist:'', hook:0,
-              lyrics:'', lines:[], audio:null, photo:null };
-  loadEditor(editing); renderLib();
-};
-function nextFreeNumber(){
-  const used = new Set(tracks.filter(t=>(t.collection||'Общая')===$('lCollection').value).map(t=>t.number));
-  for(let i=1;i<=60;i++) if(!used.has(i)) return i;
-  return null;
-}
-/* если пользователь начал заполнять форму, не нажав «+ Трек» — создаём черновик сами */
+$('libSearch').oninput=renderLib;
 function ensureEditing(){
-  if(!editing){
-    editing = { id:uid(), collection:$('eColl').value||$('lCollection').value||'Общая',
-                number:+$('eNumber').value||nextFreeNumber(), title:'', artist:'', hook:0,
-                lyrics:'', lines:[], audio:null, photo:null };
-    if(!$('eNumber').value) $('eNumber').value = editing.number||'';
-  }
+  if(!editing) editing={ id:uid(), title:'', artist:'', hook:0, lyrics:'', lines:[], audio:null, photo:null };
   return editing;
 }
+$('btnNewTrack').onclick=()=>{ editing=null; ensureEditing();
+  $('eTitle').value=''; $('eArtist').value=''; $('eHook').value=0; $('eLyrics').value='';
+  $('eAudio').value=''; $('ePhoto').value=''; $('eUsedIn').textContent='';
+  say('eStatus','Новый трек — загрузите аудио'); renderLib(); };
 function loadEditor(t){
-  editing = t;
-  $('eNumber').value=t.number||''; $('eTitle').value=t.title||''; $('eArtist').value=t.artist||'';
+  editing=t;
+  $('eTitle').value=t.title||''; $('eArtist').value=t.artist||'';
   $('eHook').value=t.hook||0; $('eLyrics').value=t.lyrics||'';
-  fillSelects(); $('eColl').value=t.collection||'Общая';
   $('eAudio').value=''; $('ePhoto').value='';
-  say('eStatus', t.audio ? (t.lines&&t.lines.length ? 'Трек готов ✓' : 'Аудио есть, текст не синхронизирован') : 'Загрузите аудиофайл');
+  const used=[];
+  collNames().forEach(c=>{ const m=settings.collections[c]||{};
+    Object.keys(m).forEach(n=>{ if(m[n]===t.id) used.push(`${c} №${n}`); }); });
+  $('eUsedIn').textContent = used.length ? 'Используется: '+used.join(' • ') : 'Пока не расставлен ни в одной коллекции';
+  say('eStatus', t.audio ? (t.lines&&t.lines.length?'Трек готов ✓':'Аудио есть, текст не синхронизирован') : 'Загрузите аудиофайл');
   renderLib();
 }
-$('eAudio').onchange = e => { const f=e.target.files[0]; if(!f) return;
+$('eAudio').onchange=e=>{ const f=e.target.files[0]; if(!f) return;
   const t=ensureEditing(); t.audio=f;
-  if(!$('eTitle').value){ $('eTitle').value=f.name.replace(/\.[^.]+$/,''); }
-  say('eStatus','Аудио загружено — не забудьте «Сохранить трек»'); };
-$('ePhoto').onchange = e => { const f=e.target.files[0]; if(!f) return;
-  const t=ensureEditing();
-  const img=new Image();
+  if(!$('eTitle').value) $('eTitle').value=f.name.replace(/\.[^.]+$/,'');
+  say('eStatus','Аудио загружено — нажмите «Сохранить в банк»'); };
+$('ePhoto').onchange=e=>{ const f=e.target.files[0]; if(!f) return;
+  const t=ensureEditing(); const img=new Image();
   img.onload=()=>{ const max=620, sc=Math.min(1,max/Math.max(img.width,img.height));
     const cv=document.createElement('canvas'); cv.width=Math.round(img.width*sc); cv.height=Math.round(img.height*sc);
     cv.getContext('2d').drawImage(img,0,0,cv.width,cv.height);
     cv.toBlob(b=>{ t.photo=b; say('eStatus','Фото загружено ✓'); },'image/jpeg',.82); };
   img.src=URL.createObjectURL(f); };
-
 function collectEditor(){
   ensureEditing();
-  editing.number = +$('eNumber').value||null;
   editing.title=$('eTitle').value; editing.artist=$('eArtist').value;
   editing.hook=+$('eHook').value||0; editing.lyrics=$('eLyrics').value;
-  editing.collection=$('eColl').value;
   return editing;
 }
-$('btnSaveTrack').onclick = async () => {
+$('btnSaveTrack').onclick=async()=>{
   const t=collectEditor();
   if(!t.audio) return say('eStatus','Нужен аудиофайл — выберите его в поле «Аудиофайл»', true);
-  try { await dbPut(t); tracks = await dbAll(); fillSelects(); renderLib(); say('eStatus','Сохранено ✓'); }
+  try{ await dbPut(t); bank=await dbAll(); renderLib(); say('eStatus','Сохранено в банк ✓'); }
   catch(e){ say('eStatus','Ошибка сохранения: '+e.message, true); }
 };
-$('btnDelTrack').onclick = async () => {
-  if(!editing) return;
-  if(!confirm('Удалить трек «'+(editing.title||'без названия')+'»?')) return;
-  await dbDel(editing.id); tracks=await dbAll(); editing=null; renderLib(); say('eStatus','Удалено');
+$('btnDelTrack').onclick=async()=>{
+  if(!editing||!editing.audio) return;
+  const used=[];
+  collNames().forEach(c=>{ const m=settings.collections[c]||{};
+    Object.keys(m).forEach(n=>{ if(m[n]===editing.id) used.push(`${c} №${n}`); }); });
+  const warn = used.length ? `\n\nТрек стоит в: ${used.join(', ')} — эти числа освободятся.` : '';
+  if(!confirm(`Удалить «${editing.title||'без названия'}» из банка?${warn}`)) return;
+  collNames().forEach(c=>{ const m=settings.collections[c]||{};
+    Object.keys(m).forEach(n=>{ if(m[n]===editing.id) delete m[n]; }); });
+  saveSettings();
+  await dbDel(editing.id); bank=await dbAll(); editing=null; ensureEditing();
+  $('btnNewTrack').click(); say('eStatus','Удалено из банка');
 };
-$('btnPreview').onclick = () => { const t=collectEditor();
-  if(!t.audio) return say('eStatus','Нужен аудиофайл', true);
-  openTrack(t); };
+$('btnPreview').onclick=()=>{ const t=collectEditor();
+  if(!t.audio) return say('eStatus','Нужен аудиофайл', true); openTrack(t,null); };
 
-/* ================= СИНХРОНИЗАЦИЯ ================= */
+/* ========== СИНХРОНИЗАЦИЯ ========== */
 function parseLyrics(raw){
   return raw.split('\n').map(s=>s.trim()).filter(Boolean)
             .map(text=>({ text, words:text.split(/\s+/).map(w=>({w})) }));
@@ -511,14 +567,14 @@ function align(ww, ll, duration){
   ll.forEach(ln=>{ ln.start=ln.words[0].start; ln.end=ln.words[ln.words.length-1].end; });
   return { lines:ll, matched:known.length, total:m };
 }
-$('btnAuto').onclick = async () => {
+$('btnAuto').onclick=async()=>{
   const t=collectEditor();
-  if(!t.audio) return say('eStatus','Нужен аудиофайл — выберите его в поле «Аудиофайл»', true);
+  if(!t.audio) return say('eStatus','Нужен аудиофайл', true);
   if(!t.lyrics.trim()) return say('eStatus','Вставьте текст песни', true);
   say('eStatus','<span class="spin"></span>Распознаю и выравниваю...');
   $('btnAuto').disabled=true;
   try{
-    const fname = t.audio.name || ('track.' + ((t.audio.type||'audio/mpeg').split('/')[1]||'mp3'));
+    const fname=t.audio.name||('track.'+((t.audio.type||'audio/mpeg').split('/')[1]||'mp3'));
     const fd=new FormData(); fd.append('audio',t.audio,fname); fd.append('lyricsHint',t.lyrics.slice(0,800));
     const r=await fetch('/api/transcribe',{method:'POST',body:fd}); const d=await r.json();
     if(!r.ok) throw new Error(d.error||'ошибка сервера');
@@ -529,12 +585,11 @@ $('btnAuto').onclick = async () => {
   }catch(e){ say('eStatus','Ошибка: '+e.message, true); }
   finally{ $('btnAuto').disabled=false; }
 };
-$('btnManual').onclick = () => {
+$('btnManual').onclick=()=>{
   const t=collectEditor();
-  if(!t.audio) return say('eStatus','Нужен аудиофайл — выберите его в поле «Аудиофайл»', true);
+  if(!t.audio) return say('eStatus','Нужен аудиофайл', true);
   if(!t.lyrics.trim()) return say('eStatus','Вставьте текст песни', true);
-  syncLines = parseLyrics(t.lyrics);
-  syncMode=true; syncIdx=0; syncTimes=[];
+  syncLines=parseLyrics(t.lyrics); syncMode=true; syncIdx=0; syncTimes=[];
   $('sync').classList.add('on'); renderSyncList();
   if(curURL) URL.revokeObjectURL(curURL);
   curURL=URL.createObjectURL(t.audio); audio.src=curURL;
@@ -571,19 +626,23 @@ function finishSync(){
     ln.words.forEach(w=>{ const dur=(en-st)*((w.w.length+1)/total); w.start=acc; w.end=acc+dur; acc+=dur; });
   });
   if(editing) editing.lines=syncLines;
-  exitSync(); say('eStatus','Синхронизация записана ✓ Нажмите «Сохранить трек»');
+  exitSync(); say('eStatus','Синхронизация записана ✓ Нажмите «Сохранить в банк»');
 }
 function exitSync(){ syncMode=false; $('sync').classList.remove('on'); audio.pause(); }
 $('btnSyncDone').onclick=finishSync;
 $('btnSyncRestart').onclick=()=>{ syncIdx=0; syncTimes=[]; audio.currentTime=+$('eHook').value||0; audio.play(); renderSyncList(); };
 $('btnSyncExit').onclick=exitSync;
 
-/* ================= СТАРТ ================= */
+/* ========== СТАРТ + миграция старой структуры ========== */
 (async function init(){
-  try { tracks = await dbAll(); } catch(e){ tracks=[]; }
-  $('gSize').value = settings.size;
-  fillSelects();
-  renderGrid();
+  try{ bank=await dbAll(); }catch(e){ bank=[]; }
+  // старые треки хранили collection и number внутри себя — переносим в коллекции
+  let migrated=false;
+  bank.forEach(t=>{ if(t.collection && t.number){
+    const m=coll(t.collection); if(!m[t.number]){ m[t.number]=t.id; migrated=true; } } });
+  if(migrated) saveSettings();
+  $('gSize').value=settings.size;
+  fillCollSelect(); renderGrid();
 })();
 </script>
 </body>
