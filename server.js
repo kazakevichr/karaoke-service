@@ -8,21 +8,22 @@ const path = require('path');
 
 const app = express();
 app.use(cors());
+app.use(express.json({ limit: '5mb' }));
 
-// Загружаем файл в память (для файлов побольше — можно переключить на diskStorage)
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 } // 50 МБ на трек
+  limits: { fileSize: 25 * 1024 * 1024 } // лимит Whisper API — 25 МБ
 });
 
 app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'Файл не получен' });
-    }
+    if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
     if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ error: 'OPENAI_API_KEY не настроен на сервере (.env файл)' });
+      return res.status(500).json({ error: 'OPENAI_API_KEY не задан в переменных окружения' });
     }
+
+    // Текст песни используется как подсказка — заметно снижает выдумки модели
+    const hint = (req.body.lyricsHint || '').slice(0, 800);
 
     const form = new FormData();
     form.append('file', req.file.buffer, { filename: req.file.originalname });
@@ -30,6 +31,8 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
     form.append('response_format', 'verbose_json');
     form.append('timestamp_granularities[]', 'word');
     form.append('language', 'ru');
+    form.append('temperature', '0');
+    if (hint) form.append('prompt', hint);
 
     const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
@@ -44,12 +47,7 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
     }
 
     const data = await response.json();
-    const words = (data.words || []).map(w => ({
-      word: w.word,
-      start: w.start,
-      end: w.end
-    }));
-
+    const words = (data.words || []).map(w => ({ word: w.word, start: w.start, end: w.end }));
     res.json({ words, duration: data.duration });
   } catch (e) {
     console.error(e);
@@ -60,4 +58,4 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Сервер запущен: http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`Сервер запущен на порту ${PORT}`));
