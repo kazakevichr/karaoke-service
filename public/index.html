@@ -43,7 +43,10 @@
   .num.empty:hover { transform:none; background:rgba(255,255,255,.02); }
   body.assign .num.empty { cursor:pointer; }
   body.assign .num.empty:hover { transform:translateY(-3px); background:rgba(59,130,246,.25); }
-  .num.played { color:var(--dim); background:rgba(255,255,255,.02); }
+  /* Сыгранные числа явно тонируем цветом акцента, чтобы издалека было видно
+     разницу между "ещё не сыграно" (яркое) и "уже сыграно" (приглушённое,
+     с цветным оттенком) — раньше оба состояния выглядели почти одинаково. */
+  .num.played { color:var(--past); background:rgba(255,46,99,.08); border-color:rgba(255,46,99,.28); opacity:.82; }
   .num.played .d span { position:relative; }
   .num.played .d span::after { content:''; position:absolute; left:-8%; right:-8%; top:48%; height:6%;
                                background:var(--accent); border-radius:3px; }
@@ -98,7 +101,7 @@
   .time { font-size:13px; color:var(--past); min-width:44px; font-variant-numeric:tabular-nums; }
 
   /* ---------- Банк ---------- */
-  .libwrap { flex:1; min-height:0; display:grid; grid-template-columns:330px 1fr; }
+  .libwrap { flex:1; min-height:0; display:grid; grid-template-columns:495px 1fr; }
   .liblist { border-right:1px solid rgba(255,255,255,.08); overflow-y:auto; padding:12px; }
   .libitem { padding:10px 12px; border-radius:9px; cursor:pointer; display:flex; gap:10px; align-items:center;
              margin-bottom:6px; background:rgba(255,255,255,.03); }
@@ -106,6 +109,8 @@
   .libitem.sel { background:rgba(255,46,99,.22); }
   .libitem .ic { width:34px; height:34px; flex-shrink:0; border-radius:8px; background:var(--card);
                  display:flex; align-items:center; justify-content:center; font-size:15px; overflow:hidden; }
+  .libitem .ic.ic-ok { color:#7be495; background:rgba(76,217,100,.14); }
+  .libitem .ic.ic-empty { color:#93c5fd; background:rgba(59,130,246,.12); }
   .libitem .ic img { width:100%; height:100%; object-fit:cover; }
   .libitem .tt { font-size:14px; line-height:1.3; }
   .libitem .tt small { color:var(--past); display:block; font-size:12px; }
@@ -210,17 +215,17 @@
 <!-- ============ БАНК ТРЕКОВ ============ -->
 <div class="view" id="vLib">
   <div class="top">
-    <button id="btnNewTrack">+ Новый трек</button>
-    <button class="sec" id="btnBatch">Массовая загрузка</button>
     <div class="fld"><label class="f">Поиск</label><input type="text" id="libSearch" placeholder="название или исполнитель" style="width:240px"></div>
-    <div class="fld"><label class="f">Категория</label><select id="libCatFilter" style="width:160px"></select></div>
     <div class="fld"><label class="f">Сортировка</label>
       <select id="libSort" style="width:200px">
         <option value="alpha">По алфавиту</option>
         <option value="date">Сначала новые</option>
       </select>
     </div>
+    <div class="fld"><label class="f">Категория</label><select id="libCatFilter" style="width:160px"></select></div>
     <button class="sec" id="btnLibUnsynced">Без синхрона</button>
+    <button id="btnNewTrack">+ Новый трек</button>
+    <button class="sec" id="btnBatch">Массовая загрузка</button>
     <div class="sp"></div>
     <span class="status" id="lStatus"></span>
     <button class="sec" id="btnToGrid">К игре</button>
@@ -396,6 +401,7 @@ const saveSettings = () => localStorage.setItem(SET, JSON.stringify(settings));
 let bank = [];              // все треки
 let editing = null;         // редактируемый трек банка
 let lines = [], curURL=null, curPhotoURL=null, lastActive=-1;
+let playReturnView='vGrid'; // куда возвращает «← Назад» из плеера: 'vGrid' (с игрового поля) или 'vLib' (после «Проверить» в редакторе)
 let assignMode = false, pickNumber = null;
 let syncMode=false, syncIdx=0, syncTimes=[], syncLines=[];
 let batchRunning=false;
@@ -478,7 +484,7 @@ function renderGrid(){
       d.innerHTML=`<div class="d" style="font-size:${fs}"><span>${i}</span></div>`+
                   `<div class="cap">${t?(t.title||'без названия'):'—'}</div>`;
     }
-    d.onclick=()=>{ if(assignMode) openPicker(i); else if(t) openTrack(t,i); };
+    d.onclick=()=>{ if(assignMode) openPicker(i); else if(t){ playReturnView='vGrid'; openTrack(t,i); } };
     wrap.appendChild(d);
   }
   const cnt=Object.values(map).filter(Boolean).length;
@@ -491,6 +497,13 @@ $('rCategory').onchange=()=>{
     fillCategorySelect($('rCategory'), true);
     $('rCategory').value = n || activeRound().category || settings.categories[0];
   }
+};
+// Меняет размер сетки текущего раунда сразу, без пересоздания расстановки —
+// «Разыграть раунд» использует это же значение, только когда раздаёт треки заново.
+$('rSize').onchange=()=>{
+  const r=activeRound();
+  r.size=+$('rSize').value;
+  saveSettings(); renderRoundTabs(); renderGrid();
 };
 $('btnStartRound').onclick=()=>{
   const cat=$('rCategory').value, size=+$('rSize').value;
@@ -570,6 +583,7 @@ $('pickClose').onclick=()=>$('picker').classList.remove('on');
 /* ========== ПЛЕЕР ========== */
 async function openTrack(t, number){
   show('vPlay');
+  $('btnBack').textContent = playReturnView==='vLib' ? '← К банку треков' : '← К числам';
   lines=t.lines||[]; lastActive=-1;
   $('zTitle').textContent=t.title||''; $('zArtist').textContent=t.artist||'';
   $('zBadge').textContent = number?'№'+number:'';
@@ -591,7 +605,11 @@ async function openTrack(t, number){
     saveSettings();
   }
 }
-$('btnBack').onclick=()=>{ audio.pause(); $('btnPlay').textContent='▶'; show('vGrid'); renderGrid(); };
+$('btnBack').onclick=()=>{
+  audio.pause(); $('btnPlay').textContent='▶';
+  show(playReturnView);
+  if(playReturnView==='vLib') renderLib(); else renderGrid();
+};
 $('btnHook').onclick=()=>{ audio.currentTime=window.__hook||0; audio.play(); $('btnPlay').textContent='⏸'; };
 $('btnStart').onclick=()=>{ audio.currentTime=0; audio.play(); $('btnPlay').textContent='⏸'; };
 $('btnPlay').onclick=()=>{ if(audio.paused){audio.play();$('btnPlay').textContent='⏸';} else {audio.pause();$('btnPlay').textContent='▶';} };
@@ -701,7 +719,8 @@ function renderLib(){
     d.className='libitem'+(editing&&editing.id===t.id?' sel':'');
     const cats=(t.categories&&t.categories.length)?t.categories.join(', '):'без категории';
     const sb=syncBadge(t), hb=hookBadge(t);
-    d.innerHTML=`<div class="ic">${t.lines&&t.lines.length?'✓':'♪'}</div>
+    const hasSync=t.lines&&t.lines.length;
+    d.innerHTML=`<div class="ic ${hasSync?'ic-ok':'ic-empty'}">${hasSync?'✓':'♪'}</div>
       <div class="tt">
         <div>${t.title||'Без названия'}<small>${t.artist||''}</small></div>
         <div class="badges">
@@ -929,7 +948,8 @@ $('btnDelTrack').onclick=async()=>{
   renderRoundTabs(); $('btnNewTrack').click(); say('eStatus','Удалено из банка');
 };
 $('btnPreview').onclick=()=>{ const t=collectEditor();
-  if(!t.audio) return say('eStatus','Нужен аудиофайл', true); openTrack(t,null); };
+  if(!t.audio) return say('eStatus','Нужен аудиофайл', true);
+  playReturnView='vLib'; openTrack(t,null); };
 
 /* ========== ПОИСК МЕТАДАННЫХ НА SPOTIFY ========== */
 $('btnSpotifySearch').onclick=async()=>{
