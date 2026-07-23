@@ -241,7 +241,10 @@ app.get('/api/search-youtube', async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
 
-  const args = [`ytsearch6:${q}`, '--dump-json', '--no-warnings', '--no-playlist'];
+  // player_client=android,web — обход HTTP 403 при обращении к YouTube с
+  // серверных/датацентровых IP (см. комментарий у /api/fetch-audio ниже).
+  const args = [`ytsearch6:${q}`, '--dump-json', '--no-warnings', '--no-playlist',
+    '--extractor-args', 'youtube:player_client=android,web'];
   const proc = spawn('yt-dlp', args);
   let stdout = '', stderr = '';
   proc.stdout.on('data', d => { stdout += d; });
@@ -281,6 +284,17 @@ app.get('/api/search-youtube', async (req, res) => {
    исходном контейнере (обычно m4a или webm), браузер его прекрасно
    воспроизводит и Whisper прекрасно распознаёт.
    ========================================================================== */
+// Запускает yt-dlp с заданными аргументами и ждёт завершения процесса.
+function runYtDlp(args) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('yt-dlp', args);
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d; });
+    proc.on('error', reject);
+    proc.on('close', code => resolve({ code, stderr }));
+  });
+}
+
 app.get('/api/fetch-audio', async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
@@ -292,7 +306,7 @@ app.get('/api/fetch-audio', async (req, res) => {
   const target = isUrl ? q : `ytsearch5:${q}`;
   const base = path.join(os.tmpdir(), `yt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
-  const args = [
+  const baseArgs = [
     target,
     '--no-playlist',
     '-f', 'bestaudio[ext=m4a]/bestaudio/best',
@@ -301,50 +315,51 @@ app.get('/api/fetch-audio', async (req, res) => {
     '-o', `${base}.%(ext)s`
   ];
   if (!isUrl) {
-    args.push('--match-filter', 'duration < 600', '--max-downloads', '1');
+    baseArgs.push('--match-filter', 'duration < 600', '--max-downloads', '1');
   }
 
-  const proc = spawn('yt-dlp', args);
-  let stderr = '';
-  proc.stderr.on('data', d => { stderr += d; });
-
-  let responded = false;
-  proc.on('error', (e) => {
-    if (responded) return;
-    responded = true;
-    console.error('yt-dlp не найден:', e.message);
-    res.status(500).json({ error: 'yt-dlp не установлен на сервере (нужен Docker-деплой, см. README)' });
-  });
-
-  proc.on('close', async (code) => {
-    if (responded) return;
-    if (code !== 0) {
-      responded = true;
-      console.error('yt-dlp error:', stderr);
-      return res.status(502).json({ error: 'Видео не найдено или не удалось скачать' });
-    }
+  // YouTube в последнее время часто отвечает "HTTP Error 403: Forbidden" на
+  // запросы с серверных/датацентровых IP, если yt-dlp представляется обычным
+  // веб-плеером. Разные "клиенты" (android/ios/tv) получают отдельные, не
+  // всегда так же ограниченные потоки — пробуем по очереди, пока один не
+  // сработает, вместо того чтобы сразу сдаваться после первой ошибки.
+  const clientAttempts = ['android,web', 'ios,web', 'tv,web', null];
+  let result = null;
+  for (const client of clientAttempts) {
+    const args = client ? [...baseArgs, '--extractor-args', `youtube:player_client=${client}`] : baseArgs;
     try {
-      const dir = path.dirname(base);
-      const prefix = path.basename(base);
-      const files = await fsp.readdir(dir);
-      const outName = files.find(f => f.startsWith(prefix));
-      if (!outName) {
-        responded = true;
-        return res.status(500).json({ error: 'Файл не найден после скачивания' });
-      }
-      const outFile = path.join(dir, outName);
-      const ext = path.extname(outName).slice(1) || 'm4a';
-      const mime = ext === 'webm' ? 'audio/webm' : ext === 'mp3' ? 'audio/mpeg' : 'audio/mp4';
-      responded = true;
-      res.set('Content-Type', mime);
-      const stream = fs.createReadStream(outFile);
-      stream.pipe(res);
-      stream.on('close', () => fsp.unlink(outFile).catch(() => {}));
+      result = await runYtDlp(args);
     } catch (e) {
-      if (!responded) { responded = true; res.status(500).json({ error: e.message }); }
-      console.error(e);
+      console.error('yt-dlp не найден:', e.message);
+      return res.status(500).json({ error: 'yt-dlp не установлен на сервере (нужен Docker-деплой, см. README)' });
     }
-  });
+    if (result.code === 0) break;
+    console.error(`yt-dlp error (client=${client || 'default'}):`, result.stderr);
+  }
+
+  if (!result || result.code !== 0) {
+    return res.status(502).json({ error: 'Видео не найдено или не удалось скачать' });
+  }
+
+  try {
+    const dir = path.dirname(base);
+    const prefix = path.basename(base);
+    const files = await fsp.readdir(dir);
+    const outName = files.find(f => f.startsWith(prefix));
+    if (!outName) {
+      return res.status(500).json({ error: 'Файл не найден после скачивания' });
+    }
+    const outFile = path.join(dir, outName);
+    const ext = path.extname(outName).slice(1) || 'm4a';
+    const mime = ext === 'webm' ? 'audio/webm' : ext === 'mp3' ? 'audio/mpeg' : 'audio/mp4';
+    res.set('Content-Type', mime);
+    const stream = fs.createReadStream(outFile);
+    stream.pipe(res);
+    stream.on('close', () => fsp.unlink(outFile).catch(() => {}));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+    console.error(e);
+  }
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
