@@ -107,8 +107,14 @@
   .libitem .ic { width:34px; height:34px; flex-shrink:0; border-radius:8px; background:var(--card);
                  display:flex; align-items:center; justify-content:center; font-size:15px; overflow:hidden; }
   .libitem .ic img { width:100%; height:100%; object-fit:cover; }
-  .libitem .tt { font-size:14px; line-height:1.3; overflow:hidden; }
+  .libitem .tt { font-size:14px; line-height:1.3; }
   .libitem .tt small { color:var(--past); display:block; font-size:12px; }
+  .badges { display:flex; flex-wrap:wrap; gap:5px; margin-top:5px; }
+  .bdg { font-size:11px; padding:2px 8px; border-radius:10px; background:rgba(255,255,255,.06); color:var(--past); white-space:nowrap; }
+  .bdg.bok { background:rgba(76,217,100,.15); color:#7be495; }
+  .bdg.bbad { background:rgba(255,46,99,.15); color:#ff8fa8; }
+  .bdg.cat { cursor:pointer; background:rgba(59,130,246,.15); color:#93c5fd; }
+  .catPanel { padding:8px 12px 12px 54px; display:flex; flex-wrap:wrap; gap:6px; margin:-4px 0 6px; }
   .libedit { overflow-y:auto; padding:18px 22px; }
   .row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px; align-items:flex-end; }
   .full { width:100%; }
@@ -208,7 +214,13 @@
     <button class="sec" id="btnBatch">Массовая загрузка</button>
     <div class="fld"><label class="f">Поиск</label><input type="text" id="libSearch" placeholder="название или исполнитель" style="width:240px"></div>
     <div class="fld"><label class="f">Категория</label><select id="libCatFilter" style="width:160px"></select></div>
-    <button class="sec" id="btnLibAlpha">А-Я</button>
+    <div class="fld"><label class="f">Сортировка</label>
+      <select id="libSort" style="width:200px">
+        <option value="alpha">По алфавиту</option>
+        <option value="date">Сначала новые</option>
+      </select>
+    </div>
+    <button class="sec" id="btnLibUnsynced">Без синхрона</button>
     <div class="sp"></div>
     <span class="status" id="lStatus"></span>
     <button class="sec" id="btnToGrid">К игре</button>
@@ -257,6 +269,10 @@
             <input type="text" id="eAudioQuery" placeholder="исполнитель название, или ссылка на YouTube">
             <button class="sec" id="btnSearchYoutube" type="button">Искать варианты</button>
           </div>
+          <span class="usedin" style="display:block;margin-top:6px">
+            ⚠ YouTube в последнее время часто блокирует скачивание с серверов — если тут ошибка,
+            самый надёжный способ заменить аудио — загрузить файл вручную выше, полем «Аудиофайл».
+          </span>
         </div>
       </div>
       <div class="row" id="youtubeResults" style="display:none"></div>
@@ -334,6 +350,10 @@
   <p>Одна песня — одна строка: «Исполнитель – Название» или ссылка на YouTube (до 60 строк).
      Для каждой строки найдутся название, исполнитель, альбом, обложка и текст — трек сразу
      попадёт в банк. Если трек не найдётся или не скачается — просто пропустится.</p>
+  <p style="color:var(--past)">Аудио сначала ищется в Яндекс.Музыке, и только если там не нашлось —
+     скачивается с YouTube (там скачивание сейчас часто блокируется серверами хостинга,
+     поэтому это запасной вариант). Если строка не нашлась ни там, ни там — она просто
+     пропустится, такой трек можно будет добавить вручную через «+ Новый трек».</p>
   <textarea id="batchInput" class="full" style="height:150px" placeholder="Юрий Шатунов - Седая ночь&#10;Любэ - Конь&#10;https://www.youtube.com/watch?v=..."></textarea>
   <div class="sync-actions">
     <button id="btnBatchStart">Скачать всё</button>
@@ -636,24 +656,67 @@ audio.addEventListener('ended', ()=>$('btnPlay').textContent='▶');
 window.addEventListener('resize', ()=>positionTrack(lastActive<0?0:lastActive));
 
 /* ========== БАНК ТРЕКОВ ========== */
-let libSortAlpha=true;
+let libSortMode='alpha';
+let libOnlyUnsynced=false;
+let openCatEditors=new Set();
+
+// id трека = Date.now().toString(36) + 5 случайных символов (см. uid()) —
+// у старых треков без явного createdAt дату добавления восстанавливаем из id.
+function trackCreatedAt(t){
+  if(t.createdAt) return t.createdAt;
+  const ts = t.id ? parseInt(t.id.slice(0,-5),36) : 0;
+  return isNaN(ts) ? 0 : ts;
+}
+function syncBadge(t){
+  const hasLyrics=!!(t.lyrics&&t.lyrics.trim());
+  const hasLines=!!(t.lines&&t.lines.length);
+  if(!hasLyrics) return {label:'Текст: нет', cls:'bdim'};
+  if(!hasLines) return {label:'Текст: не синхр.', cls:'bbad'};
+  if(t.syncPct==null) return {label:'Синхрон: ✓', cls:'bok'};
+  return {label:`Синхрон: ${t.syncPct}%`, cls: t.syncPct>=60?'bok':'bbad'};
+}
+function isUnsynced(t){
+  const hasLyrics=!!(t.lyrics&&t.lyrics.trim());
+  const hasLines=!!(t.lines&&t.lines.length);
+  if(!hasLyrics||!hasLines) return true;
+  return t.syncPct!=null && t.syncPct<60;
+}
+function hookBadge(t){
+  return (t.hook && +t.hook>0) ? {label:'Припев: '+fmt(+t.hook), cls:'bok'} : {label:'Припев: —', cls:'bdim'};
+}
 function renderLib(){
   const q=$('libSearch').value.toLowerCase().trim();
   const catF=$('libCatFilter')?$('libCatFilter').value:'';
   const box=$('libList'); box.innerHTML='';
   let list=bank.filter(t=>!q||(t.title||'').toLowerCase().includes(q)||(t.artist||'').toLowerCase().includes(q));
   if(catF) list=list.filter(t=>(t.categories&&t.categories.length?t.categories:['Общая']).includes(catF));
+  if(libOnlyUnsynced) list=list.filter(isUnsynced);
   list=[...list];
-  if(libSortAlpha) list.sort((a,b)=>(a.title||'').localeCompare(b.title||'','ru'));
+  if(libSortMode==='date') list.sort((a,b)=>trackCreatedAt(b)-trackCreatedAt(a));
+  else list.sort((a,b)=>(a.title||'').localeCompare(b.title||'','ru'));
   if(!list.length) box.innerHTML='<div style="color:#4a4868;font-size:14px;padding:10px">Ничего не найдено. Измените фильтры или нажмите «+ Новый трек».</div>';
   list.forEach(t=>{
+    const wrap=document.createElement('div');
     const d=document.createElement('div');
     d.className='libitem'+(editing&&editing.id===t.id?' sel':'');
     const cats=(t.categories&&t.categories.length)?t.categories.join(', '):'без категории';
+    const sb=syncBadge(t), hb=hookBadge(t);
     d.innerHTML=`<div class="ic">${t.lines&&t.lines.length?'✓':'♪'}</div>
-      <div class="tt">${t.title||'Без названия'}<small>${t.artist||''} • ${cats}</small></div>
+      <div class="tt">
+        <div>${t.title||'Без названия'}<small>${t.artist||''}</small></div>
+        <div class="badges">
+          <span class="bdg ${sb.cls}">${sb.label}</span>
+          <span class="bdg ${hb.cls}">${hb.label}</span>
+          <span class="bdg cat" data-catbtn>${cats} ▾</span>
+        </div>
+      </div>
       <button class="gh" data-quickdel title="Удалить из банка" style="margin-left:auto;padding:4px 9px;font-size:13px;flex-shrink:0">×</button>`;
-    d.onclick=(e)=>{ if(e.target.closest('[data-quickdel]')) return; loadEditor(t); };
+    d.onclick=(e)=>{ if(e.target.closest('[data-quickdel]')||e.target.closest('[data-catbtn]')) return; loadEditor(t); };
+    d.querySelector('[data-catbtn]').onclick=(e)=>{
+      e.stopPropagation();
+      if(openCatEditors.has(t.id)) openCatEditors.delete(t.id); else openCatEditors.add(t.id);
+      renderLib();
+    };
     d.querySelector('[data-quickdel]').onclick=async(e)=>{
       e.stopPropagation();
       const used2=roundsContaining(t.id);
@@ -665,15 +728,36 @@ function renderLib(){
       if(editing && editing.id===t.id){ editing=null; ensureEditing(); $('btnNewTrack').click(); }
       renderRoundTabs(); renderLib();
     };
-    box.appendChild(d);
+    wrap.appendChild(d);
+    if(openCatEditors.has(t.id)){
+      const panel=document.createElement('div'); panel.className='catPanel';
+      settings.categories.forEach(c=>{
+        const on=(t.categories||[]).includes(c);
+        const chip=document.createElement('button'); chip.type='button';
+        chip.className='sec'+(on?' on':''); chip.style.cssText='padding:4px 10px;font-size:12px';
+        chip.textContent=c;
+        chip.onclick=async(e)=>{
+          e.stopPropagation();
+          t.categories=t.categories||[];
+          const idx=t.categories.indexOf(c);
+          if(idx>=0) t.categories.splice(idx,1); else t.categories.push(c);
+          await dbPut(t);
+          renderLib();
+        };
+        panel.appendChild(chip);
+      });
+      wrap.appendChild(panel);
+    }
+    box.appendChild(wrap);
   });
   say('lStatus', `${list.length} из ${bank.length} треков в банке`);
 }
 $('libSearch').oninput=renderLib;
 $('libCatFilter').onchange=renderLib;
-$('btnLibAlpha').onclick=()=>{ libSortAlpha=!libSortAlpha; $('btnLibAlpha').classList.toggle('on', libSortAlpha); renderLib(); };
+$('libSort').onchange=()=>{ libSortMode=$('libSort').value; renderLib(); };
+$('btnLibUnsynced').onclick=()=>{ libOnlyUnsynced=!libOnlyUnsynced; $('btnLibUnsynced').classList.toggle('on', libOnlyUnsynced); renderLib(); };
 function ensureEditing(){
-  if(!editing) editing={ id:uid(), title:'', artist:'', album:'', hook:0, lyrics:'', lines:[], audio:null, photo:null, categories:['Общая'] };
+  if(!editing) editing={ id:uid(), title:'', artist:'', album:'', hook:0, lyrics:'', lines:[], audio:null, photo:null, categories:['Общая'], createdAt:Date.now() };
   return editing;
 }
 // Показывает, что аудио/обложка уже загружены в текущий трек (а не просто
@@ -733,11 +817,12 @@ function loadEditor(t){
   say('eStatus', t.audio ? (t.lines&&t.lines.length?'Трек готов ✓':'Аудио есть, текст не синхронизирован') : 'Загрузите аудиофайл');
   renderLib();
 }
-$('eAudio').onchange=e=>{ const f=e.target.files[0]; if(!f) return;
+$('eAudio').onchange=async e=>{ const f=e.target.files[0]; if(!f) return;
   const t=ensureEditing(); t.audio=f;
   if(!$('eTitle').value) $('eTitle').value=f.name.replace(/\.[^.]+$/,'');
   updateFileStatus();
-  say('eStatus','Аудио загружено — нажмите «Сохранить в банк»'); };
+  say('eStatus','Аудио загружено — нажмите «Сохранить в банк»');
+  await maybeAutoSync(); };
 
 // Уменьшает фото/обложку и отдаёт готовый Blob — общая логика для ручной
 // загрузки файла, подстановки обложки со Spotify и массовой загрузки.
@@ -800,6 +885,7 @@ async function applyYoutubeChoice(v){
     updateFileStatus();
     $('youtubeResults').style.display='none';
     say('eStatus','Аудио заменено ✓ Проверьте («Проверить») и нажмите «Сохранить в банк»');
+    await maybeAutoSync();
   }catch(e){ say('eStatus','Ошибка: '+e.message, true); }
 }
 
@@ -814,7 +900,7 @@ $('btnFindLyrics').onclick=async()=>{
   try{
     const r=await fetch(`/api/lyrics?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(title)}`);
     const data=await r.json().catch(()=>({}));
-    if(r.ok && data.lyrics){ $('eLyrics').value=data.lyrics; say('eStatus','Текст найден ✓'); }
+    if(r.ok && data.lyrics){ $('eLyrics').value=data.lyrics; say('eStatus','Текст найден ✓'); await maybeAutoSync(); }
     else say('eStatus','Текст не найден ни в одном источнике — впишите вручную', true);
   }catch(e){ say('eStatus','Ошибка поиска текста: '+e.message, true); }
   finally{ $('btnFindLyrics').disabled=false; }
@@ -894,6 +980,7 @@ async function applySpotifyTrack(t){
   parts.push(gotCover?'обложка загружена':'обложку загрузить не удалось');
   parts.push(gotLyrics?'текст найден — проверьте его перед синхронизацией':'текст не найден, впишите вручную');
   say('eStatus', parts.join(', ')+'.');
+  if(gotLyrics) await maybeAutoSync();
 }
 
 /* ========== МАССОВАЯ ЗАГРУЗКА (список треков → скачивание с YouTube + метаданные) ========== */
@@ -914,6 +1001,16 @@ function parseBatchLine(line){
   return { artist:'', title:line.trim() };
 }
 
+// Проверка дублей: сравниваем название+исполнителя нормализованно (как при
+// сопоставлении слов в align()), чтобы не тратить время на повторное
+// скачивание того, что уже есть в банке (например, строка встретилась в
+// списке дважды, или список уже частично загружали раньше).
+function findDuplicateTrack(title, artist){
+  const nt=norm(title||''), na=norm(artist||'');
+  if(!nt) return null;
+  return bank.find(t=>norm(t.title||'')===nt && norm(t.artist||'')===na);
+}
+
 async function downloadOneTrack(line){
   const isUrl=/^https?:\/\//.test(line);
   let title='', artist='', album='', cover='';
@@ -930,6 +1027,10 @@ async function downloadOneTrack(line){
       }
     }catch(e){ /* нет метаданных Spotify — используем то, что разобрали из строки */ }
   }
+
+  // Проверяем банк ДО скачивания аудио — если трек уже есть, не тратим время/трафик.
+  const dup=findDuplicateTrack(title, artist);
+  if(dup){ const err=new Error('уже есть в банке'); err.duplicate=true; throw err; }
 
   const audioQuery = isUrl ? line : `${artist} ${title}`.trim();
   const audioResp=await fetch('/api/fetch-audio?q='+encodeURIComponent(audioQuery));
@@ -957,9 +1058,27 @@ async function downloadOneTrack(line){
     }catch(e){ /* текст необязателен, впишется вручную позже */ }
   }
 
+  // Если текст нашёлся — сразу пробуем авто-синхрон (тот же алгоритм, что и
+  // кнопка «Авто-синхрон» в редакторе трека), чтобы трек попадал в банк уже
+  // готовым, без отдельного клика по каждому.
+  let lines=[], syncPct=null;
+  if(lyrics && lyrics.trim()){
+    try{
+      const fd=new FormData(); fd.append('audio',audioFile,audioFile.name); fd.append('lyricsHint',lyrics.slice(0,800));
+      const tr=await fetch('/api/transcribe',{method:'POST',body:fd});
+      const td=await tr.json();
+      if(tr.ok){
+        const res=align(td.words||[], parseLyrics(lyrics), td.duration);
+        lines=res.lines;
+        syncPct=Math.round(res.matched/res.total*100);
+      }
+    }catch(e){ /* синхрон не удался — трек всё равно сохранится, досинхронизируете вручную */ }
+  }
+
   await dbPut({
     id:uid(), title: title||'Без названия', artist, album, hook:0,
-    lyrics, lines:[], audio:audioFile, photo:photoBlob, categories:['Общая']
+    lyrics, lines, syncPct, audio:audioFile, photo:photoBlob, categories:['Общая'],
+    createdAt: Date.now()
   });
 }
 
@@ -976,24 +1095,28 @@ $('btnBatchStart').onclick=async()=>{
     return d.querySelector('.tc');
   });
 
-  let done=0, failed=0;
+  let done=0, failed=0, skipped=0;
   for(let i=0;i<lines.length;i++){
     if(!batchRunning) break;
     statusEls[i].textContent='⬇ скачивается...';
-    $('batchProgress').textContent=`${done+failed}/${lines.length}`;
+    $('batchProgress').textContent=`${done+failed+skipped}/${lines.length}`;
     try{
       await downloadOneTrack(lines[i]);
+      bank=await dbAll(); // обновляем банк сразу — чтобы повторы внутри этого же списка тоже ловились как дубли
       statusEls[i].textContent='✅ готово'; done++;
     }catch(e){
-      statusEls[i].textContent='❌ '+e.message; failed++;
-      console.error('Ошибка загрузки строки:', lines[i], e);
+      if(e.duplicate){ statusEls[i].textContent='⏭ '+e.message; skipped++; }
+      else {
+        statusEls[i].textContent='❌ '+e.message; failed++;
+        console.error('Ошибка загрузки строки:', lines[i], e);
+      }
     }
-    $('batchProgress').textContent=`${done+failed}/${lines.length}`;
+    $('batchProgress').textContent=`${done+failed+skipped}/${lines.length}`;
   }
 
   batchRunning=false; $('btnBatchStart').disabled=false;
   bank=await dbAll(); renderLib();
-  $('batchProgress').textContent=`Готово: ${done} загружено, ${failed} с ошибкой из ${lines.length}`;
+  $('batchProgress').textContent=`Готово: ${done} загружено, ${skipped} уже были в банке, ${failed} с ошибкой из ${lines.length}`;
 };
 
 /* ========== СИНХРОНИЗАЦИЯ ========== */
@@ -1025,7 +1148,7 @@ function align(ww, ll, duration){
   ll.forEach(ln=>{ ln.start=ln.words[0].start; ln.end=ln.words[ln.words.length-1].end; });
   return { lines:ll, matched:known.length, total:m };
 }
-$('btnAuto').onclick=async()=>{
+async function runAutoSync(){
   const t=collectEditor();
   if(!t.audio) return say('eStatus','Нужен аудиофайл', true);
   if(!t.lyrics.trim()) return say('eStatus','Вставьте текст песни', true);
@@ -1039,10 +1162,23 @@ $('btnAuto').onclick=async()=>{
     const res=align(d.words||[], parseLyrics(t.lyrics), d.duration);
     t.lines=res.lines;
     const pct=Math.round(res.matched/res.total*100);
+    t.syncPct=pct;
     say('eStatus',`Опознано ${res.matched} из ${res.total} слов (${pct}%). ${pct<55?'Лучше пройти «Синхрон вручную».':'Сохраните трек.'}`);
   }catch(e){ say('eStatus','Ошибка: '+e.message, true); }
   finally{ $('btnAuto').disabled=false; }
-};
+}
+$('btnAuto').onclick=runAutoSync;
+
+// Если у трека уже есть и аудио, и текст, а синхрона ещё не было — запускаем
+// авто-синхрон сам, без отдельного клика (срабатывает после загрузки/замены
+// аудио, подстановки текста со Spotify или по кнопке «Найти текст»). Если
+// синхрон уже есть — не трогаем, чтобы не затирать чужую ручную правку.
+async function maybeAutoSync(){
+  if(!editing || !editing.audio) return;
+  if(!$('eLyrics').value.trim()) return;
+  if(editing.lines && editing.lines.length) return;
+  await runAutoSync();
+}
 $('btnManual').onclick=()=>{
   const t=collectEditor();
   if(!t.audio) return say('eStatus','Нужен аудиофайл', true);
@@ -1126,7 +1262,7 @@ function finishSync(){
     const total=ln.words.reduce((s,w)=>s+w.w.length+1,0); let acc=st;
     ln.words.forEach(w=>{ const dur=(en-st)*((w.w.length+1)/total); w.start=acc; w.end=acc+dur; acc+=dur; });
   });
-  if(editing) editing.lines=syncLines;
+  if(editing){ editing.lines=syncLines; editing.syncPct=100; }
   exitSync(); say('eStatus','Синхронизация сохранена ✓ Нажмите «Сохранить в банк»');
 }
 function exitSync(){ syncMode=false; $('sync').classList.remove('on'); audio.pause(); $('syncPlay').textContent='▶'; }
