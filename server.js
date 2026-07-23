@@ -278,12 +278,32 @@ app.get('/api/search-youtube', async (req, res) => {
 });
 
 /* ==========================================================================
-   Скачивание аудио с YouTube (как spotDL: ищет трек по названию/исполнителю
-   и скачивает лучший аудио-поток). Требует установленный yt-dlp в PATH —
-   см. Dockerfile. Без транскодирования (не нужен ffmpeg): отдаём файл в
-   исходном контейнере (обычно m4a или webm), браузер его прекрасно
-   воспроизводит и Whisper прекрасно распознаёт.
+   Скачивание аудио. Основной источник — Яндекс.Музыка (та же библиотека, что
+   и для метаданных/текста, см. scripts/ym_lookup.py): YouTube с 2025 года
+   всё активнее блокирует скачивание с серверных/датацентровых IP (403,
+   DRM-заглушки, недоступные форматы — независимо от того, каким "клиентом"
+   представляется yt-dlp), а Яндекс пока так агрессивно не ограничивает.
+   YouTube остаётся запасным вариантом — на случай, если трека нет на
+   Яндекс.Музыке, либо когда пользователь сам выбрал конкретное видео
+   (ссылка) через «Искать варианты».
    ========================================================================== */
+// Запускает scripts/ym_lookup.py в режиме download: скачивает mp3 по пути outPath.
+function runYandexDownload(query, outPath) {
+  return new Promise((resolve) => {
+    const scriptPath = path.join(__dirname, 'scripts', 'ym_lookup.py');
+    const proc = spawn('python3', [scriptPath, 'download', query, outPath]);
+    let stdout = '', stderr = '';
+    proc.stdout.on('data', d => { stdout += d; });
+    proc.stderr.on('data', d => { stderr += d; });
+    proc.on('error', (e) => resolve({ error: 'python3/ym_lookup.py не найден: ' + e.message }));
+    proc.on('close', () => {
+      const lastLine = stdout.trim().split('\n').filter(Boolean).pop();
+      try { resolve(JSON.parse(lastLine)); }
+      catch (e) { resolve({ error: stderr.trim() || 'Не удалось разобрать ответ Яндекс.Музыки' }); }
+    });
+  });
+}
+
 // Запускает yt-dlp с заданными аргументами и ждёт завершения процесса.
 function runYtDlp(args) {
   return new Promise((resolve, reject) => {
@@ -300,6 +320,24 @@ app.get('/api/fetch-audio', async (req, res) => {
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
 
   const isUrl = /^https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//.test(q);
+
+  // Текстовый запрос ("исполнитель — название") — сначала пробуем Яндекс.Музыку.
+  // Прямую ссылку на конкретное YouTube-видео (пользователь явно выбрал версию
+  // через «Искать варианты») через Яндекс не ищем — качаем её с YouTube напрямую.
+  if (!isUrl) {
+    const ymPath = path.join(os.tmpdir(), `ym-${Date.now()}-${Math.random().toString(36).slice(2)}.mp3`);
+    const ymResult = await runYandexDownload(q, ymPath);
+    if (ymResult && ymResult.ok) {
+      res.set('Content-Type', 'audio/mpeg');
+      const stream = fs.createReadStream(ymPath);
+      stream.pipe(res);
+      stream.on('close', () => fsp.unlink(ymPath).catch(() => {}));
+      return;
+    }
+    console.warn('Яндекс.Музыка (аудио) не сработала, пробуем YouTube:', ymResult && ymResult.error);
+    fsp.unlink(ymPath).catch(() => {});
+  }
+
   // Берём топ-5 результатов поиска и скачиваем первый, что короче 10 минут —
   // так реже попадаются концертные записи/сборники вместо самого трека.
   // Файл ограничен 20 МБ (с запасом под лимит Whisper в 25 МБ на распознавание).
