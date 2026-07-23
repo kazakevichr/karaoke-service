@@ -5,15 +5,22 @@
 
 Используется как запасной источник метаданных/текста песни, когда Spotify
 недоступен (например, требует Premium-подписку у владельца приложения) или
-ничего не нашёл по запросу.
+ничего не нашёл по запросу. А также — как ОСНОВНОЙ источник скачивания
+самого аудио (см. do_download): YouTube с 2025 года всё активнее блокирует
+скачивание с серверных/датацентровых IP, а Яндекс.Музыка пока так агрессивно
+не ограничивает — поэтому скачивание сначала пробуем здесь, и только если
+не получилось, откатываемся на yt-dlp/YouTube (см. server.js).
 
 Использование:
     python3 ym_lookup.py search "<текстовый запрос>"
     python3 ym_lookup.py lyrics "<текстовый запрос>"
+    python3 ym_lookup.py download "<текстовый запрос>" "<путь для сохранения .mp3>"
 
-В обоих случаях в stdout печатается ровно одна строка JSON — её и читает
+В search/lyrics в stdout печатается ровно одна строка JSON — её и читает
 server.js. Любая ошибка тоже возвращается как JSON с полем "error", чтобы
-вызывающая сторона не падала на пустом/невалидном выводе.
+вызывающая сторона не падала на пустом/невалидном выводе. В download,
+помимо метаданных, сам файл сохраняется по указанному пути, а JSON в stdout
+только подтверждает успех (поле "ok") и дублирует метаданные.
 
 Токен (переменная окружения YANDEX_MUSIC_TOKEN) необязателен — поиск и
 метаданные Яндекс.Музыки по большей части доступны и анонимно. Если хочется
@@ -76,9 +83,36 @@ def do_lyrics(query):
     return {'lyrics': text}
 
 
+def do_download(query, out_path):
+    client = make_client()
+    result = client.search(query, type_='track')
+    if not (result and result.tracks and result.tracks.results):
+        return {'error': 'Трек не найден в Яндекс.Музыке'}
+
+    top = result.tracks.results[0]
+    try:
+        # Яндекс сам отдаёт готовый mp3-поток нужного битрейта — локальный
+        # ffmpeg/транскодирование не требуется.
+        top.download(out_path, codec='mp3', bitrate_in_kbps=192)
+    except Exception as e:
+        return {'error': f'Не удалось скачать через Яндекс.Музыку: {e}'}
+
+    if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        return {'error': 'Яндекс.Музыка не отдала файл (пустой ответ)'}
+
+    album = top.albums[0] if top.albums else None
+    return {
+        'ok': True,
+        'title': top.title or '',
+        'artist': ', '.join(a.name for a in (top.artists or []) if a.name),
+        'album': album.title if album else '',
+        'cover': cover_url(top.cover_uri or (album.cover_uri if album else '')),
+    }
+
+
 def main():
     if len(sys.argv) < 3:
-        print(json.dumps({'error': 'Использование: ym_lookup.py <search|lyrics> <запрос>'}))
+        print(json.dumps({'error': 'Использование: ym_lookup.py <search|lyrics|download> <запрос> [путь]'}))
         sys.exit(1)
 
     mode, query = sys.argv[1], sys.argv[2]
@@ -87,6 +121,11 @@ def main():
             out = do_search(query)
         elif mode == 'lyrics':
             out = do_lyrics(query)
+        elif mode == 'download':
+            if len(sys.argv) < 4:
+                out = {'error': 'Для download нужен путь для сохранения файла'}
+            else:
+                out = do_download(query, sys.argv[3])
         else:
             out = {'error': f'Неизвестный режим: {mode}'}
         print(json.dumps(out, ensure_ascii=False))
