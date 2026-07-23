@@ -58,7 +58,7 @@
                                  letter-spacing:.04em; text-align:center; overflow:hidden; max-height:1.8vh; }
   .num.played .num-badge { position:absolute; top:.6vh; right:.7vw; font-size:1.1vh; font-weight:700; color:var(--dim); }
   .num.last { box-shadow:0 0 0 3px var(--accent), 0 0 40px rgba(255,46,99,.5); }
-  .num .cap { font-size:1.5vh; font-weight:600; color:var(--past); margin-top:.6vh;
+  .num .cap { font-size:1.5vh; font-weight:600; color:#fff; margin-top:.6vh;
               padding:0 .5vw; text-align:center; line-height:1.25; max-height:4vh; overflow:hidden; display:none; }
   body.assign .num .cap { display:block; }
 
@@ -180,6 +180,7 @@
     <button class="gh" id="btnUndo">Сбросить последнюю</button>
     <button class="gh" id="btnResetPlayed">Сбросить все</button>
     <button class="sec" id="btnAssign">Расставить треки</button>
+    <button class="sec" id="btnBlanks">Бланки для участников</button>
     <div class="sp"></div>
     <span class="status" id="gStatus"></span>
     <button class="sec" id="btnToLib">Банк треков</button>
@@ -369,6 +370,38 @@
   <div class="sync-list" id="batchList"></div>
 </div>
 
+<!-- ============ БЛАНКИ ДЛЯ УЧАСТНИКОВ ============ -->
+<div class="sync" id="blanksView">
+  <h3>Бланки для участников</h3>
+  <p>Как в лото: каждому игроку — свой уникальный бланк из треков, которые
+     реально расставлены в текущем раунде (не из всей категории). Открывается
+     отдельная страница для печати — по одному бланку на лист.</p>
+  <div class="row" style="margin:0 0 6px">
+    <span class="status" id="blanksPoolInfo"></span>
+  </div>
+  <div class="row">
+    <div class="fld"><label class="f">Игроков (бланков)</label><input type="number" id="bnCount" min="1" max="200" value="20" style="width:100px"></div>
+    <div class="fld"><label class="f">Заголовок</label><input type="text" id="bnTitle" style="width:280px"></div>
+  </div>
+  <div class="row">
+    <div class="fld full"><label class="f">Текст раунда</label><input type="text" id="bnRoundLabel" class="full"></div>
+  </div>
+  <div class="row">
+    <div class="fld"><label class="f">Номинация (необязательно)</label><input type="text" id="bnNomination" style="width:340px" placeholder="например: Самый активный и весёлый столик"></div>
+    <div class="fld"><label class="f">Подпись</label><input type="text" id="bnTagline" style="width:220px"></div>
+  </div>
+  <div class="row">
+    <div class="fld full"><label class="f">Ссылка для QR-кода (необязательно — соцсеть, Telegram и т.д.)</label><input type="text" id="bnQrUrl" class="full" placeholder="https://..."></div>
+  </div>
+  <div class="sync-actions">
+    <button id="btnBlanksGenerate">Сгенерировать и сохранить</button>
+    <button class="sec" id="btnBlanksOpenSaved">Открыть сохранённые</button>
+    <span class="status" id="blanksStatus"></span>
+    <div style="flex:1"></div>
+    <button class="gh" id="btnBlanksClose">Закрыть</button>
+  </div>
+</div>
+
 <audio id="audio"></audio>
 
 <script>
@@ -392,7 +425,7 @@ async function dbDel(id){const d=await idb();return new Promise((res,rej)=>{cons
    трек может носить сразу несколько тегов. При старте раунда сервис случайно
    берёт N треков из пула нужной категории и раскладывает их по числам. */
 const SET='karaoke_settings_v2';
-function freshRound(){ return { category:'', size:30, map:{}, played:{}, history:[] }; }
+function freshRound(){ return { category:'', size:30, map:{}, played:{}, history:[], blanks:null }; }
 const settings = Object.assign(
   { categories:['Общая'], activeRound:0 },
   JSON.parse(localStorage.getItem(SET)||'{}'));
@@ -411,6 +444,8 @@ const audio = $('audio');
 const fmt = s => isFinite(s) ? Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0') : '0:00';
 const norm = w => w.toLowerCase().replace(/ё/g,'е').replace(/[^a-zа-я0-9]/g,'');
 const uid = () => Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+const shuffleArr = arr => [...arr].sort(()=>Math.random()-.5);
+const escapeHtml = s => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const say = (el,t,err) => { const e=$(el); e.innerHTML=t; e.className='status'+(err?' err':''); };
 const trackById = id => bank.find(t=>t.id===id);
 const show = v => ['vGrid','vPlay','vLib'].forEach(x=>$(x).classList.toggle('on', x===v));
@@ -514,13 +549,24 @@ $('btnStartRound').onclick=()=>{
   const hasProgress = Object.keys(r.played||{}).length>0 || Object.keys(r.map||{}).length>0;
   if(hasProgress && !confirm(`Раунд ${settings.activeRound+1} будет пересоздан заново — текущая расстановка и отметки сыгранного сотрутся. Продолжить?`)) return;
   const n=Math.min(size, pool.length);
-  const shuffled=[...pool].sort(()=>Math.random()-.5).slice(0,n);
+  // Стараемся не повторять треки, которые уже стоят в ДРУГИХ раундах — чтобы
+  // раунды меньше пересекались, если в категории хватает треков на все сразу.
+  // Если "свежих" (не занятых другими раундами) треков не хватает — добираем
+  // оставшимися: повтор в этом случае неизбежен, треков в категории просто мало.
+  const usedElsewhere = new Set();
+  settings.rounds.forEach((rr,ri)=>{ if(ri!==settings.activeRound) Object.values(rr.map||{}).forEach(id=>{ if(id) usedElsewhere.add(id); }); });
+  const fresh = pool.filter(t=>!usedElsewhere.has(t.id));
+  const rest = pool.filter(t=>usedElsewhere.has(t.id));
+  const shuffled=[...shuffleArr(fresh), ...shuffleArr(rest)].slice(0,n);
+  const overlapCount=Math.max(0, n-fresh.length);
   const map={}; shuffled.forEach((t,idx)=>{ map[idx+1]=t.id; });
-  r.category=cat; r.size=n; r.map=map; r.played={}; r.history=[];
+  r.category=cat; r.size=n; r.map=map; r.played={}; r.history=[]; r.blanks=null;
   saveSettings(); renderRoundTabs(); renderGrid();
   say('gStatus', n<size
     ? `Раунд ${settings.activeRound+1}: в категории «${cat}» нашлось только ${n} треков — раунд сокращён`
-    : `Раунд ${settings.activeRound+1}: ${n} треков из категории «${cat}» расставлено случайно`);
+    : overlapCount>0
+      ? `Раунд ${settings.activeRound+1}: ${n} треков расставлено, но в категории «${cat}» не хватает уникальных — ${overlapCount} совпадают с другими раундами`
+      : `Раунд ${settings.activeRound+1}: ${n} треков из категории «${cat}» расставлено случайно`);
 };
 $('btnAssign').onclick = () => {
   assignMode=!assignMode;
@@ -1293,6 +1339,141 @@ $('btnSyncRestart').onclick=()=>{
 };
 $('btnSyncExit').onclick=exitSync;
 
+/* ========== БЛАНКИ ДЛЯ УЧАСТНИКОВ ==========
+   Печатный бланк — как в лото: сетка из "Артист - Название", берём ТОЛЬКО
+   треки, реально расставленные по числам в текущем раунде (r.map), а не всю
+   категорию. Раскладка каждого бланка (какие треки и в каком порядке) сохраняется
+   в settings.rounds[i].blanks — можно закрыть окно печати и открыть заново
+   без пересборки, а «Сгенерировать» пересобирает и перезаписывает её заново. */
+function trackLabel(id){
+  const t=trackById(id);
+  if(!t) return '—';
+  const parts=[]; if(t.artist) parts.push(t.artist); parts.push(t.title||'Без названия');
+  return parts.join(' - ');
+}
+function blankPoolIds(roundIdx){
+  const r=settings.rounds[roundIdx];
+  return [...new Set(Object.values(r.map||{}).filter(Boolean))];
+}
+function buildBlankCards(roundIdx, opts){
+  const poolIds=blankPoolIds(roundIdx);
+  if(!poolIds.length) return null;
+  const cols=5;
+  const cellCount=Math.min(25, poolIds.length);
+  const rows=Math.ceil(cellCount/cols);
+  const cards=[];
+  for(let i=0;i<opts.count;i++) cards.push(shuffleArr(poolIds).slice(0,cellCount));
+  return { cols, rows, cellCount, cards,
+    title:opts.title, roundLabel:opts.roundLabel, nomination:opts.nomination,
+    tagline:opts.tagline, qrUrl:opts.qrUrl, generatedAt:Date.now() };
+}
+function blanksArrowSvg(){
+  return `<svg width="86" height="56" viewBox="0 0 86 56"><path d="M4,10 C38,4 52,44 74,40" stroke="#000" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M61,32 L76,42 L60,48" stroke="#000" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+function renderBlanksDoc(blanks){
+  const cardsHtml=blanks.cards.map(cardIds=>{
+    let rowsHtml='';
+    for(let ri=0; ri<blanks.rows; ri++){
+      let cellsHtml='';
+      for(let ci=0; ci<blanks.cols; ci++){
+        const idx=ri*blanks.cols+ci;
+        cellsHtml += idx<cardIds.length
+          ? `<td>${escapeHtml(trackLabel(cardIds[idx]))}</td>`
+          : `<td class="empty">—</td>`;
+      }
+      rowsHtml += `<tr>${cellsHtml}</tr>`;
+    }
+    const qrHtml = blanks.qrUrl ? `<div class="qrWrap">${blanksArrowSvg()}<img class="qr" src="https://api.qrserver.com/v1/create-qr-code/?size=170x170&data=${encodeURIComponent(blanks.qrUrl)}" alt="QR"></div>` : '';
+    return `<div class="card">
+      <h1>${escapeHtml(blanks.title||'МУЗЫКАЛЬНОЕ ЛОТО')}</h1>
+      <table class="grid"><tbody>${rowsHtml}</tbody></table>
+      <div class="footer">
+        ${blanks.roundLabel ? `<div class="line1">${escapeHtml(blanks.roundLabel)}</div>` : ''}
+        ${blanks.nomination ? `<div class="line2">Номинация <i>${escapeHtml(blanks.nomination)}</i></div>` : ''}
+        ${blanks.tagline ? `<div class="line3">${escapeHtml(blanks.tagline)}</div>` : ''}
+      </div>
+      ${qrHtml}
+    </div>`;
+  }).join('');
+  return `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
+  <title>Бланки — ${escapeHtml(blanks.title||'МУЗЫКАЛЬНОЕ ЛОТО')}</title>
+  <style>
+    @page { size: A4; margin: 12mm; }
+    * { box-sizing:border-box; }
+    body { font-family: Arial, Helvetica, sans-serif; color:#000; background:#fff; margin:0; }
+    .card { page-break-after:always; padding:8mm 4mm; }
+    .card:last-child { page-break-after:auto; }
+    .card h1 { font-size:38px; font-weight:900; text-align:center; letter-spacing:.01em; margin:0 0 16px; }
+    table.grid { width:100%; border-collapse:collapse; table-layout:fixed; }
+    table.grid td { border:2px solid #000; padding:12px 6px; text-align:center; font-weight:700;
+                    font-size:14px; line-height:1.25; vertical-align:middle; height:64px; }
+    table.grid td.empty { color:#ccc; border-color:#999; }
+    .footer { margin-top:18px; }
+    .footer .line1 { font-size:19px; font-weight:800; }
+    .footer .line2 { font-size:17px; font-weight:700; margin-top:6px; }
+    .footer .line2 i { font-weight:600; font-style:italic; }
+    .footer .line3 { font-size:19px; font-weight:800; margin-top:10px; }
+    .qrWrap { display:flex; align-items:flex-end; justify-content:flex-end; gap:8px; margin-top:16px; }
+    .qrWrap .qr { width:150px; height:150px; }
+    .toolbar { padding:14px; text-align:center; }
+    .toolbar button { font-size:15px; padding:9px 22px; border-radius:8px; border:0;
+                       background:#ff2e63; color:#fff; font-weight:700; cursor:pointer; }
+    @media print { .toolbar { display:none; } }
+  </style></head><body>
+  <div class="toolbar"><button onclick="window.print()">Печать / Сохранить как PDF</button></div>
+  ${cardsHtml}
+  </body></html>`;
+}
+function openBlanksModal(){
+  const idx=settings.activeRound;
+  const r=settings.rounds[idx];
+  const poolIds=blankPoolIds(idx);
+  say('blanksPoolInfo', !poolIds.length
+    ? `Раунд ${idx+1}: треки ещё не расставлены — сначала «Разыграть раунд» или «Расставить треки».`
+    : `Раунд ${idx+1}${r.category?' · '+r.category:''}: доступно ${poolIds.length} треков для бланка (карточка вместит до ${Math.min(25,poolIds.length)}).`);
+  const saved=r.blanks;
+  $('bnCount').value = saved ? saved.cards.length : 20;
+  $('bnTitle').value = saved ? saved.title : 'МУЗЫКАЛЬНОЕ ЛОТО';
+  $('bnRoundLabel').value = saved ? saved.roundLabel : `${idx+1} раунд: Собери комбинацию по вертикали или горизонтали`;
+  $('bnNomination').value = saved ? (saved.nomination||'') : '';
+  $('bnTagline').value = saved ? saved.tagline : 'Давайте общаться!';
+  $('bnQrUrl').value = saved ? (saved.qrUrl||'') : '';
+  say('blanksStatus', saved ? `Сохранено ${saved.cards.length} бланков (${new Date(saved.generatedAt).toLocaleString('ru')})` : '');
+  $('btnBlanksOpenSaved').disabled=!saved;
+  $('blanksView').classList.add('on');
+}
+$('btnBlanks').onclick=openBlanksModal;
+$('btnBlanksClose').onclick=()=>$('blanksView').classList.remove('on');
+$('btnBlanksGenerate').onclick=()=>{
+  const idx=settings.activeRound;
+  const count=Math.max(1, Math.min(200, +$('bnCount').value||20));
+  const opts={
+    count,
+    title:$('bnTitle').value.trim()||'МУЗЫКАЛЬНОЕ ЛОТО',
+    roundLabel:$('bnRoundLabel').value.trim(),
+    nomination:$('bnNomination').value.trim(),
+    tagline:$('bnTagline').value.trim(),
+    qrUrl:$('bnQrUrl').value.trim(),
+  };
+  const blanks=buildBlankCards(idx, opts);
+  if(!blanks) return say('blanksStatus','В этом раунде ещё нет расставленных треков', true);
+  settings.rounds[idx].blanks=blanks;
+  saveSettings();
+  say('blanksStatus', `Сохранено ${blanks.cards.length} бланков ✓`);
+  $('btnBlanksOpenSaved').disabled=false;
+  const win=window.open('', '_blank');
+  if(!win) return say('blanksStatus','Браузер заблокировал открытие окна — разрешите всплывающие окна для этого сайта и нажмите «Открыть сохранённые»', true);
+  win.document.open(); win.document.write(renderBlanksDoc(blanks)); win.document.close();
+};
+$('btnBlanksOpenSaved').onclick=()=>{
+  const idx=settings.activeRound;
+  const blanks=settings.rounds[idx].blanks;
+  if(!blanks) return say('blanksStatus','Для этого раунда ещё нет сохранённых бланков', true);
+  const win=window.open('', '_blank');
+  if(!win) return say('blanksStatus','Браузер заблокировал открытие окна — разрешите всплывающие окна для этого сайта', true);
+  win.document.open(); win.document.write(renderBlanksDoc(blanks)); win.document.close();
+};
+
 /* ========== СТАРТ + миграция старой структуры (коллекции→категории, раунды) ========== */
 async function migrateToRoundsAndCategories(){
   let dirty=false;
@@ -1321,7 +1502,7 @@ async function migrateToRoundsAndCategories(){
     const curName = settings.collection || 'Общая';
     settings.rounds=[
       { category:curName, size:settings.size||30, map:oldCollections[curName]||{},
-        played:(settings.played||{})[curName]||{}, history:(settings.history||{})[curName]||[] },
+        played:(settings.played||{})[curName]||{}, history:(settings.history||{})[curName]||[], blanks:null },
       freshRound(), freshRound()
     ];
     settings.activeRound=0;
