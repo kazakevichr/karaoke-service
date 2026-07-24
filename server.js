@@ -609,22 +609,30 @@ function parseGeniusHtml(html) {
     .replace(/<\/div>/gi, '\n') // границы служебных виджетов (заголовок, аннотация) — тоже разделитель
     .replace(/<a[^>]*>|<\/a>/gi, '')
     .replace(/<[^>]+>/g, '')
-    .replace(/\[[^\]]*\]/g, '') // убираем пометки вида [Verse 1], [Chorus]
     .replace(/&amp;/g, '&').replace(/&#x27;/g, "'").replace(/&quot;/g, '"')
     .split('\n').map(s => s.trim()).filter(Boolean);
   // Перед самим текстом в том же контейнере иногда лежит служебная шапка
   // страницы («12 ContributorsTranslationsRomanization<Название> Lyrics») и/или
-  // абзац-аннотация об истории песни — срезаем такие строки в начале (не больше
-  // 3, чтобы случайно не задеть настоящий куплет): служебная шапка почти всегда
-  // содержит «Contributors» или заканчивается английским «Lyrics», а
-  // аннотация обычно заметно длиннее одной строки куплета.
-  let stripped = 0;
-  while (lines.length && stripped < 3 &&
-         (/\blyrics\b/i.test(lines[0]) || /\bcontributors?\b/i.test(lines[0]) || lines[0].length > 160)) {
-    lines = lines.slice(1);
-    stripped++;
+  // абзац-аннотация об истории песни (может занимать несколько строк). Самый
+  // надёжный ориентир, где эта шапка заканчивается — пометка секции вида
+  // [Verse 1]/[Chorus]/[Intro] (Genius почти всегда начинает ею сам текст).
+  // Бракеты убираем уже ПОСЛЕ того, как нашли по ним точку отсчёта.
+  const sectionIdx = lines.findIndex(l => /^\[[^\]]+\]$/.test(l));
+  if (sectionIdx > 0) {
+    lines = lines.slice(sectionIdx);
+  } else {
+    // Явной пометки секции нет — режем эвристикой служебные строки в начале
+    // (не больше 4, чтобы не задеть сам текст): шапка почти всегда содержит
+    // «Contributors» или заканчивается английским «Lyrics», а аннотация
+    // обычно заметно длиннее одной строки куплета.
+    let stripped = 0;
+    while (lines.length && stripped < 4 &&
+           (/\blyrics\b/i.test(lines[0]) || /\bcontributors?\b/i.test(lines[0]) || lines[0].length > 160)) {
+      lines = lines.slice(1);
+      stripped++;
+    }
   }
-  const text = lines.join('\n');
+  const text = lines.map(l => l.replace(/\[[^\]]*\]/g, '').trim()).filter(Boolean).join('\n');
   // Если вышло подозрительно коротко (пара строк служебного текста, а не
   // куплет) — считаем, что разбор не удался, а не отдаём огрызок.
   if (!text || lines.length < 4) return null;
