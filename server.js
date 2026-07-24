@@ -303,9 +303,11 @@ app.delete('/api/saved-games/:id', (req, res) => {
 
 // Собирает ZIP с оффлайн-версией конкретной сохранённой игры: HTML-плеер без
 // сети (сетка чисел, розыгрыш, караоке, бланки — без редактора банка) + аудио
-// и обложки рядом файлами. Стримит архив сразу в ответ — без временных файлов
-// на диске и без буферизации целых аудиофайлов в памяти (каждый идёт из S3
-// прямо в архив как поток).
+// и обложки рядом файлами. Архив сначала полностью собирается во временный
+// файл на диске (каждый аудио/фото идёт из S3 прямо в архив как поток, без
+// буферизации в памяти), и только потом отдаётся клиенту — так браузер сразу
+// знает точный вес файла (Content-Length) и может показать честный прогресс,
+// а не индикатор «качается неизвестно сколько».
 const OFFLINE_TEMPLATE_PATH = path.join(__dirname, 'public', 'offline-template.html');
 // Сколько файлов качаем из S3 одновременно при сборке архива. Раньше это
 // было строго по одному (see git history) — для игры на полсотни треков
@@ -313,26 +315,37 @@ const OFFLINE_TEMPLATE_PATH = path.join(__dirname, 'public', 'offline-template.h
 // ТОЛЬКО на ожидание S3, прежде чем архив вообще начнёт течь пользователю.
 const ZIP_S3_CONCURRENCY = 8;
 
+// Отдаёт уже готовый файл архива клиенту: с точным Content-Length (чтобы
+// браузер/наш fetch-код на клиенте знали вес и могли показать честный
+// прогресс), затем стримит содержимое.
+function sendZipFile(req, res, filePath, safeName, log) {
+  const size = fs.statSync(filePath).size;
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}.zip"`);
+  res.setHeader('Content-Length', size);
+  log('отдаю файл клиенту, размер:', size);
+  const stream = fs.createReadStream(filePath);
+  stream.on('error', e => { log('ошибка чтения файла:', e.message); if (!res.headersSent) res.status(500).end(); });
+  stream.pipe(res);
+}
+
 app.get('/api/saved-games/:id/download', async (req, res) => {
   const t0 = Date.now();
   const log = (...args) => console.log(`[download ${req.params.id} +${Date.now() - t0}ms]`, ...args);
   const cachePath = path.join(ZIP_CACHE_DIR, `${req.params.id}.zip`);
+  let tmpCachePath = null;
   try {
     log('старт');
     const row = db.prepare('SELECT * FROM saved_games WHERE id = ?').get(req.params.id);
     if (!row) return res.status(404).json({ error: 'Игра не найдена' });
 
     const safeName = (row.name || 'game').replace(/[^a-zA-Zа-яА-Я0-9 _-]/g, '').trim() || 'game';
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}.zip"`);
 
     // Сохранённая игра — неизменный снимок (см. /api/saved-games POST): один
     // раз собранный архив можно отдавать повторно мгновенно, без пересборки.
     if (fs.existsSync(cachePath)) {
-      log('отдаю готовый архив из кэша:', cachePath);
-      const cached = fs.createReadStream(cachePath);
-      cached.on('error', e => { log('ошибка чтения кэша:', e.message); if (!res.headersSent) res.status(500).end(); });
-      cached.pipe(res);
+      log('архив уже в кэше:', cachePath);
+      sendZipFile(req, res, cachePath, safeName, log);
       return;
     }
 
@@ -364,19 +377,21 @@ app.get('/api/saved-games/:id/download', async (req, res) => {
 
     const archive = archiver('zip', { zlib: { level: 6 } });
     archive.on('warning', w => log('архив warning:', w.message));
-    archive.on('error', err => { log('архив error:', err.message); try { res.end(); } catch {} });
     archive.on('entry', entry => log('архив entry добавлен:', entry.name));
     archive.on('end', () => log('архив end (все данные переданы в поток)'));
-    res.on('close', () => log('res closed, headersSent=', res.headersSent, 'writableEnded=', res.writableEnded));
 
-    // Пишем одновременно в ответ клиенту И во временный файл кэша — второе
-    // скачивание того же сохранения будет мгновенным (см. ветку с fs.existsSync выше).
-    const tmpCachePath = `${cachePath}.tmp-${process.pid}-${Date.now()}`;
+    // Сначала архив полностью собирается во временный файл на диске — и
+    // только когда он готов, отдаём его клиенту одним куском с точным
+    // Content-Length (см. sendZipFile выше). Так браузер/наш прогресс-бар на
+    // клиенте видят реальный вес файла с самого начала скачивания, а не
+    // просто индикатор "качается неизвестно сколько".
+    tmpCachePath = `${cachePath}.tmp-${process.pid}-${Date.now()}`;
     const cacheStream = fs.createWriteStream(tmpCachePath);
-    let cacheFailed = false;
-    cacheStream.on('error', e => { cacheFailed = true; log('кэш: ошибка записи (не критично, скачивание продолжается):', e.message); });
-
-    archive.pipe(res);
+    const archiveDone = new Promise((resolve, reject) => {
+      archive.on('error', reject);
+      cacheStream.on('error', reject);
+      cacheStream.on('close', resolve);
+    });
     archive.pipe(cacheStream);
 
     // игра.html — обычный текст, сжимать его дёшево и есть смысл (в разы
@@ -417,17 +432,17 @@ app.get('/api/saved-games/:id/download', async (req, res) => {
 
     log('вызываю archive.finalize()');
     await archive.finalize();
-    log('archive.finalize() промис разрешён');
+    await archiveDone;
+    log('архив полностью собран на диске');
 
-    cacheStream.on('close', () => {
-      if (cacheFailed) { fsp.unlink(tmpCachePath).catch(() => {}); return; }
-      fsp.rename(tmpCachePath, cachePath)
-        .then(() => log('кэш архива сохранён:', cachePath))
-        .catch(e => { log('кэш: не удалось сохранить (не критично):', e.message); fsp.unlink(tmpCachePath).catch(() => {}); });
-    });
+    await fsp.rename(tmpCachePath, cachePath);
+    log('кэш архива сохранён:', cachePath);
+
+    sendZipFile(req, res, cachePath, safeName, log);
   } catch (e) {
     log('ИСКЛЮЧЕНИЕ:', e.message);
     console.error(e);
+    if (tmpCachePath) fs.unlink(tmpCachePath, () => {});
     if (!res.headersSent) res.status(500).json({ error: e.message });
     else { try { res.end(); } catch {} }
   }
