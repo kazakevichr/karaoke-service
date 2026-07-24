@@ -1265,8 +1265,12 @@ async function runAutoSync(){
   $('btnAuto').disabled=true;
   try{
     // Если файл ещё не был загружен на сервер (свежевыбранный) — берём его прямо
-    // из памяти; если трек уже сохранён — забираем байты по его серверному URL.
-    const audioBlob = t.audio instanceof Blob ? t.audio : await (await fetch(t.audioUrl)).blob();
+    // из памяти; если трек уже сохранён — забираем байты через свой же сервер
+    // (НЕ напрямую с S3 — у бакета нет CORS-заголовков, прямой fetch с S3-адреса
+    // из браузера будет падать с "Failed to fetch", хотя обычное воспроизведение
+    // через <audio> при этом работает нормально, т.к. на него CORS не действует).
+    const audioBlob = t.audio instanceof Blob ? t.audio
+      : await (await fetch('/api/tracks/'+encodeURIComponent(t.id)+'/audio-file')).blob();
     const fname=(t.audio&&t.audio.name)||('track.'+((audioBlob.type||'audio/mpeg').split('/')[1]||'mp3'));
     const fd=new FormData(); fd.append('audio',audioBlob,fname); fd.append('lyricsHint',t.lyrics.slice(0,800));
     const r=await fetch('/api/transcribe',{method:'POST',body:fd}); const d=await r.json();
