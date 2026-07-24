@@ -11,6 +11,7 @@ const fsp = require('fs/promises');
 const { spawn } = require('child_process');
 const Database = require('better-sqlite3');
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const archiver = require('archiver');
 
 const app = express();
 app.use(cors());
@@ -57,6 +58,12 @@ db.exec(`
   );
   CREATE TABLE IF NOT EXISTS settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
+    data TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS saved_games (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    createdAt INTEGER,
     data TEXT NOT NULL
   );
 `);
@@ -215,6 +222,145 @@ app.put('/api/settings', (req, res) => {
     `).run(JSON.stringify(req.body || {}));
     res.json({ ok: true });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+/* ---- API: сохранённые игры (для оффлайн-скачивания) ----
+   "Сохранить игру" фиксирует текущую раскладку треков по числам в раундах как
+   отдельный именованный снимок в базе — независимо от того, что случится с
+   общим банком треков потом. Снимок хранит копию метаданных нужных треков
+   (название/исполнитель/текст/тайминги), поэтому текст и синхронизация не
+   пострадают, даже если исходный трек потом отредактируют или удалят из банка.
+   Сами аудиофайлы в снимке НЕ дублируются в S3 (остаётся только ссылка-ключ) —
+   если трек удалят из банка позже, его аудио пропадёт из архива при скачивании
+   (сознательный компромисс, см. обсуждение ТЗ). */
+app.post('/api/saved-games', (req, res) => {
+  try {
+    const { name, rounds } = req.body || {};
+    if (!name || !name.trim()) return res.status(400).json({ error: 'Укажите название игры' });
+    if (!Array.isArray(rounds)) return res.status(400).json({ error: 'Нет данных раундов' });
+
+    // Раунды без единого расставленного трека в снимок не берём — офлайн-игре
+    // от них всё равно никакой пользы, только пустая вкладка.
+    const nonEmptyRounds = rounds.filter(r => r.map && Object.values(r.map).some(Boolean));
+    if (!nonEmptyRounds.length) {
+      return res.status(400).json({ error: 'Нечего сохранять — сначала расставьте треки хотя бы в одном раунде («Разыграть раунд»)' });
+    }
+
+    const trackIds = new Set();
+    nonEmptyRounds.forEach(r => Object.values(r.map || {}).forEach(id => { if (id) trackIds.add(id); }));
+
+    const tracksSnapshot = {};
+    trackIds.forEach(id => {
+      const row = db.prepare('SELECT * FROM tracks WHERE id = ?').get(id);
+      if (row) {
+        tracksSnapshot[id] = {
+          id: row.id, title: row.title, artist: row.artist, album: row.album, hook: row.hook,
+          lyrics: row.lyrics, lines: JSON.parse(row.lines || '[]'), syncPct: row.syncPct,
+          audioKey: row.audioKey, audioType: row.audioType, photoKey: row.photoKey,
+        };
+      }
+    });
+
+    const id = 'g' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    const data = {
+      rounds: nonEmptyRounds.map(r => ({ category: r.category || '', size: +r.size || 0, map: r.map || {} })),
+      tracks: tracksSnapshot,
+    };
+    const createdAt = Date.now();
+    db.prepare('INSERT INTO saved_games (id, name, createdAt, data) VALUES (?, ?, ?, ?)')
+      .run(id, name.trim(), createdAt, JSON.stringify(data));
+    res.json({ id, name: name.trim(), createdAt });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/saved-games', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT id, name, createdAt, data FROM saved_games ORDER BY createdAt DESC').all();
+    res.json(rows.map(r => {
+      const data = JSON.parse(r.data);
+      const roundsCount = (data.rounds || []).filter(rr => Object.keys(rr.map || {}).length).length;
+      const trackCount = Object.keys(data.tracks || {}).length;
+      return { id: r.id, name: r.name, createdAt: r.createdAt, roundsCount, trackCount };
+    }));
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/saved-games/:id', (req, res) => {
+  try {
+    db.prepare('DELETE FROM saved_games WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// Собирает ZIP с оффлайн-версией конкретной сохранённой игры: HTML-плеер без
+// сети (сетка чисел, розыгрыш, караоке, бланки — без редактора банка) + аудио
+// и обложки рядом файлами. Стримит архив сразу в ответ — без временных файлов
+// на диске и без буферизации целых аудиофайлов в памяти (каждый идёт из S3
+// прямо в архив как поток).
+const OFFLINE_TEMPLATE_PATH = path.join(__dirname, 'public', 'offline-template.html');
+app.get('/api/saved-games/:id/download', async (req, res) => {
+  try {
+    const row = db.prepare('SELECT * FROM saved_games WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Игра не найдена' });
+    const data = JSON.parse(row.data);
+
+    let template;
+    try { template = fs.readFileSync(OFFLINE_TEMPLATE_PATH, 'utf8'); }
+    catch (e) { return res.status(500).json({ error: 'Оффлайн-шаблон не найден на сервере' }); }
+
+    const offlineTracks = {};
+    for (const [tid, t] of Object.entries(data.tracks || {})) {
+      const audioExt = t.audioKey ? (path.extname(t.audioKey) || '.mp3') : null;
+      const photoExt = t.photoKey ? (path.extname(t.photoKey) || '.jpg') : null;
+      offlineTracks[tid] = {
+        id: t.id, title: t.title, artist: t.artist, album: t.album, hook: t.hook,
+        lyrics: t.lyrics, lines: t.lines, syncPct: t.syncPct,
+        audioFile: audioExt ? `audio/${tid}${audioExt}` : null,
+        photoFile: photoExt ? `photos/${tid}${photoExt}` : null,
+      };
+    }
+    const offlineData = { name: row.name, savedAt: row.createdAt, rounds: data.rounds, tracks: offlineTracks };
+    const html = template.replace(
+      '/*__GAME_DATA__*/null',
+      JSON.stringify(offlineData).replace(/</g, '\\u003c')
+    );
+
+    const safeName = (row.name || 'game').replace(/[^a-zA-Zа-яА-Я0-9 _-]/g, '').trim() || 'game';
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}.zip"`);
+
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    archive.on('warning', w => console.warn('Архив (предупреждение):', w.message));
+    archive.on('error', err => { console.error('Ошибка сборки архива:', err); try { res.end(); } catch {} });
+    archive.pipe(res);
+
+    archive.append(html, { name: 'игра.html' });
+
+    if (s3Enabled) {
+      for (const [tid, t] of Object.entries(data.tracks || {})) {
+        if (t.audioKey) {
+          try {
+            const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: t.audioKey }));
+            const ext = path.extname(t.audioKey) || '.mp3';
+            archive.append(obj.Body, { name: `audio/${tid}${ext}` });
+          } catch (e) { console.warn(`Пропускаю аудио трека ${tid} (не найдено в S3):`, e.message); }
+        }
+        if (t.photoKey) {
+          try {
+            const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: t.photoKey }));
+            const ext = path.extname(t.photoKey) || '.jpg';
+            archive.append(obj.Body, { name: `photos/${tid}${ext}` });
+          } catch (e) { console.warn(`Пропускаю обложку трека ${tid} (не найдена в S3):`, e.message); }
+        }
+      }
+    }
+
+    await archive.finalize();
+  } catch (e) {
+    console.error(e);
+    if (!res.headersSent) res.status(500).json({ error: e.message });
+    else { try { res.end(); } catch {} }
+  }
 });
 
 app.post('/api/transcribe', (req, res) => {
