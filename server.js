@@ -9,6 +9,8 @@ const os = require('os');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const { spawn } = require('child_process');
+const Database = require('better-sqlite3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 
 const app = express();
 app.use(cors());
@@ -17,6 +19,184 @@ app.use(express.json({ limit: '5mb' }));
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 } // лимит Whisper API — 25 МБ
+});
+// Отдельный лимит для загрузки самих треков в общий банк — тут ограничение
+// Whisper (25 МБ) уже не при чём, это просто хранение файла в S3.
+const uploadTrackFile = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }
+});
+
+/* ==========================================================================
+   Общий банк треков и раунды — теперь на сервере, а не в IndexedDB/localStorage
+   браузера, чтобы с сервисом можно было работать с любого устройства.
+   Метаданные (название/исполнитель/текст/тайминги/раунды) — в SQLite-файле
+   (путь берётся из DB_PATH; ОБЯЗАТЕЛЬНО должен указывать на персистентный том
+   в Coolify — иначе база будет обнуляться при каждом передеплое). Сами
+   аудиофайлы и обложки — в S3-совместимом хранилище (переменные S3_*).
+   ========================================================================== */
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'karaoke.db');
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tracks (
+    id TEXT PRIMARY KEY,
+    title TEXT DEFAULT '',
+    artist TEXT DEFAULT '',
+    album TEXT DEFAULT '',
+    hook REAL DEFAULT 0,
+    lyrics TEXT DEFAULT '',
+    lines TEXT DEFAULT '[]',
+    syncPct INTEGER,
+    categories TEXT DEFAULT '[]',
+    audioKey TEXT,
+    audioType TEXT,
+    photoKey TEXT,
+    createdAt INTEGER
+  );
+  CREATE TABLE IF NOT EXISTS settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    data TEXT NOT NULL
+  );
+`);
+
+const s3Enabled = !!(process.env.S3_ENDPOINT && process.env.S3_BUCKET && process.env.S3_ACCESS_KEY && process.env.S3_SECRET_KEY);
+const s3 = s3Enabled ? new S3Client({
+  endpoint: process.env.S3_ENDPOINT,
+  region: process.env.S3_REGION || 'ru-1',
+  credentials: { accessKeyId: process.env.S3_ACCESS_KEY, secretAccessKey: process.env.S3_SECRET_KEY },
+  forcePathStyle: true, // большинство S3-совместимых провайдеров (не сам AWS) требуют path-style URL
+}) : null;
+if (!s3Enabled) {
+  console.warn('S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY/S3_SECRET_KEY не заданы — загрузка аудио/обложек в общий банк работать не будет, пока их не добавить в переменные окружения.');
+}
+const S3_PUBLIC_BASE = (process.env.S3_PUBLIC_BASE_URL || '').replace(/\/$/, '');
+function s3PublicUrl(key) {
+  if (!key) return null;
+  if (S3_PUBLIC_BASE) return `${S3_PUBLIC_BASE}/${key}`;
+  return `${(process.env.S3_ENDPOINT || '').replace(/\/$/, '')}/${process.env.S3_BUCKET}/${key}`;
+}
+async function s3Upload(key, buffer, contentType) {
+  await s3.send(new PutObjectCommand({
+    Bucket: process.env.S3_BUCKET, Key: key, Body: buffer,
+    ContentType: contentType || 'application/octet-stream', ACL: 'public-read',
+  }));
+}
+async function s3Delete(key) {
+  if (!key) return;
+  try { await s3.send(new DeleteObjectCommand({ Bucket: process.env.S3_BUCKET, Key: key })); }
+  catch (e) { console.warn('Не удалось удалить объект из S3:', key, e.message); }
+}
+function rowToTrack(row) {
+  return {
+    id: row.id, title: row.title, artist: row.artist, album: row.album,
+    hook: row.hook, lyrics: row.lyrics,
+    lines: JSON.parse(row.lines || '[]'),
+    syncPct: row.syncPct,
+    categories: JSON.parse(row.categories || '[]'),
+    audioUrl: s3PublicUrl(row.audioKey),
+    photoUrl: s3PublicUrl(row.photoKey),
+    createdAt: row.createdAt,
+  };
+}
+
+/* ---- API: общий банк треков ---- */
+app.get('/api/tracks', (req, res) => {
+  const rows = db.prepare('SELECT * FROM tracks ORDER BY createdAt DESC').all();
+  res.json(rows.map(rowToTrack));
+});
+
+app.put('/api/tracks/:id', (req, res) => {
+  try {
+    const id = req.params.id;
+    const b = req.body || {};
+    const existing = db.prepare('SELECT * FROM tracks WHERE id = ?').get(id);
+    const createdAt = existing ? existing.createdAt : (b.createdAt || Date.now());
+    db.prepare(`
+      INSERT INTO tracks (id, title, artist, album, hook, lyrics, lines, syncPct, categories, audioKey, photoKey, audioType, createdAt)
+      VALUES (@id, @title, @artist, @album, @hook, @lyrics, @lines, @syncPct, @categories, @audioKey, @photoKey, @audioType, @createdAt)
+      ON CONFLICT(id) DO UPDATE SET
+        title=excluded.title, artist=excluded.artist, album=excluded.album, hook=excluded.hook,
+        lyrics=excluded.lyrics, lines=excluded.lines, syncPct=excluded.syncPct, categories=excluded.categories
+    `).run({
+      id, title: b.title || '', artist: b.artist || '', album: b.album || '',
+      hook: +b.hook || 0, lyrics: b.lyrics || '',
+      lines: JSON.stringify(b.lines || []), syncPct: b.syncPct == null ? null : b.syncPct,
+      categories: JSON.stringify(b.categories || []),
+      audioKey: existing ? existing.audioKey : null, photoKey: existing ? existing.photoKey : null,
+      audioType: existing ? existing.audioType : null,
+      createdAt,
+    });
+    res.json(rowToTrack(db.prepare('SELECT * FROM tracks WHERE id = ?').get(id)));
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/tracks/:id/audio', (req, res) => {
+  uploadTrackFile.single('audio')(req, res, async (uploadErr) => {
+    if (uploadErr) {
+      const code = uploadErr.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+      return res.status(code).json({ error: uploadErr.code === 'LIMIT_FILE_SIZE' ? 'Файл слишком большой (лимит 50 МБ)' : 'Ошибка загрузки файла: ' + uploadErr.message });
+    }
+    try {
+      if (!s3Enabled) return res.status(500).json({ error: 'S3 не настроен на сервере (заданы не все переменные S3_*)' });
+      if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
+      const id = req.params.id;
+      const existing = db.prepare('SELECT * FROM tracks WHERE id = ?').get(id);
+      if (!existing) return res.status(404).json({ error: 'Трек не найден — сначала сохраните метаданные' });
+      const ext = (path.extname(req.file.originalname || '') || '.mp3').replace('.', '') || 'mp3';
+      const key = `audio/${id}.${ext}`;
+      await s3Upload(key, req.file.buffer, req.file.mimetype);
+      if (existing.audioKey && existing.audioKey !== key) await s3Delete(existing.audioKey);
+      db.prepare('UPDATE tracks SET audioKey = ?, audioType = ? WHERE id = ?').run(key, req.file.mimetype, id);
+      res.json({ url: s3PublicUrl(key) });
+    } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+  });
+});
+
+app.post('/api/tracks/:id/photo', (req, res) => {
+  uploadTrackFile.single('photo')(req, res, async (uploadErr) => {
+    if (uploadErr) return res.status(400).json({ error: 'Ошибка загрузки файла: ' + uploadErr.message });
+    try {
+      if (!s3Enabled) return res.status(500).json({ error: 'S3 не настроен на сервере (заданы не все переменные S3_*)' });
+      if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
+      const id = req.params.id;
+      const existing = db.prepare('SELECT * FROM tracks WHERE id = ?').get(id);
+      if (!existing) return res.status(404).json({ error: 'Трек не найден — сначала сохраните метаданные' });
+      const key = `photo/${id}.jpg`;
+      await s3Upload(key, req.file.buffer, req.file.mimetype || 'image/jpeg');
+      db.prepare('UPDATE tracks SET photoKey = ? WHERE id = ?').run(key, id);
+      res.json({ url: s3PublicUrl(key) });
+    } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+  });
+});
+
+app.delete('/api/tracks/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const existing = db.prepare('SELECT * FROM tracks WHERE id = ?').get(id);
+    if (existing) {
+      if (existing.audioKey) await s3Delete(existing.audioKey);
+      if (existing.photoKey) await s3Delete(existing.photoKey);
+    }
+    db.prepare('DELETE FROM tracks WHERE id = ?').run(id);
+    res.json({ ok: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+/* ---- API: настройки (категории, раунды) — один общий JSON-документ ---- */
+app.get('/api/settings', (req, res) => {
+  const row = db.prepare('SELECT data FROM settings WHERE id = 1').get();
+  res.json(row ? JSON.parse(row.data) : null);
+});
+app.put('/api/settings', (req, res) => {
+  try {
+    db.prepare(`
+      INSERT INTO settings (id, data) VALUES (1, ?)
+      ON CONFLICT(id) DO UPDATE SET data = excluded.data
+    `).run(JSON.stringify(req.body || {}));
+    res.json({ ok: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/transcribe', (req, res) => {
