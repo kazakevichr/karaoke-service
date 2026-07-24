@@ -39,6 +39,12 @@ const uploadTrackFile = multer({
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'karaoke.db');
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
+// Кэш готовых ZIP-архивов офлайн-игр — на том же персистентном томе, что и БД
+// (см. DB_PATH выше), чтобы не терялся при передеплое. Сохранённая игра —
+// неизменный снимок, поэтому один раз собранный архив можно смело отдавать
+// повторно вместо пересборки с нуля на каждое скачивание.
+const ZIP_CACHE_DIR = path.join(path.dirname(DB_PATH), 'zip-cache');
+fs.mkdirSync(ZIP_CACHE_DIR, { recursive: true });
 db.pragma('journal_mode = WAL');
 db.exec(`
   CREATE TABLE IF NOT EXISTS tracks (
@@ -288,6 +294,9 @@ app.get('/api/saved-games', (req, res) => {
 app.delete('/api/saved-games/:id', (req, res) => {
   try {
     db.prepare('DELETE FROM saved_games WHERE id = ?').run(req.params.id);
+    // Подчищаем закэшированный архив, если он был собран (см. ZIP_CACHE_DIR) —
+    // иначе он останется на диске бесполезным мусором.
+    fs.unlink(path.join(ZIP_CACHE_DIR, `${req.params.id}.zip`), () => {});
     res.json({ ok: true });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
@@ -298,13 +307,35 @@ app.delete('/api/saved-games/:id', (req, res) => {
 // на диске и без буферизации целых аудиофайлов в памяти (каждый идёт из S3
 // прямо в архив как поток).
 const OFFLINE_TEMPLATE_PATH = path.join(__dirname, 'public', 'offline-template.html');
+// Сколько файлов качаем из S3 одновременно при сборке архива. Раньше это
+// было строго по одному (see git history) — для игры на полсотни треков
+// это 100+ последовательных запросов по ~150мс каждый, т.е. 15-20+ секунд
+// ТОЛЬКО на ожидание S3, прежде чем архив вообще начнёт течь пользователю.
+const ZIP_S3_CONCURRENCY = 8;
+
 app.get('/api/saved-games/:id/download', async (req, res) => {
   const t0 = Date.now();
   const log = (...args) => console.log(`[download ${req.params.id} +${Date.now() - t0}ms]`, ...args);
+  const cachePath = path.join(ZIP_CACHE_DIR, `${req.params.id}.zip`);
   try {
     log('старт');
     const row = db.prepare('SELECT * FROM saved_games WHERE id = ?').get(req.params.id);
     if (!row) return res.status(404).json({ error: 'Игра не найдена' });
+
+    const safeName = (row.name || 'game').replace(/[^a-zA-Zа-яА-Я0-9 _-]/g, '').trim() || 'game';
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}.zip"`);
+
+    // Сохранённая игра — неизменный снимок (см. /api/saved-games POST): один
+    // раз собранный архив можно отдавать повторно мгновенно, без пересборки.
+    if (fs.existsSync(cachePath)) {
+      log('отдаю готовый архив из кэша:', cachePath);
+      const cached = fs.createReadStream(cachePath);
+      cached.on('error', e => { log('ошибка чтения кэша:', e.message); if (!res.headersSent) res.status(500).end(); });
+      cached.pipe(res);
+      return;
+    }
+
     const data = JSON.parse(row.data);
     log('запись из БД получена, треков:', Object.keys(data.tracks || {}).length);
 
@@ -331,44 +362,55 @@ app.get('/api/saved-games/:id/download', async (req, res) => {
     );
     log('HTML собран, размер:', html.length);
 
-    const safeName = (row.name || 'game').replace(/[^a-zA-Zа-яА-Я0-9 _-]/g, '').trim() || 'game';
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}.zip"`);
-
     const archive = archiver('zip', { zlib: { level: 6 } });
     archive.on('warning', w => log('архив warning:', w.message));
     archive.on('error', err => { log('архив error:', err.message); try { res.end(); } catch {} });
     archive.on('entry', entry => log('архив entry добавлен:', entry.name));
     archive.on('end', () => log('архив end (все данные переданы в поток)'));
     res.on('close', () => log('res closed, headersSent=', res.headersSent, 'writableEnded=', res.writableEnded));
-    archive.pipe(res);
 
+    // Пишем одновременно в ответ клиенту И во временный файл кэша — второе
+    // скачивание того же сохранения будет мгновенным (см. ветку с fs.existsSync выше).
+    const tmpCachePath = `${cachePath}.tmp-${process.pid}-${Date.now()}`;
+    const cacheStream = fs.createWriteStream(tmpCachePath);
+    let cacheFailed = false;
+    cacheStream.on('error', e => { cacheFailed = true; log('кэш: ошибка записи (не критично, скачивание продолжается):', e.message); });
+
+    archive.pipe(res);
+    archive.pipe(cacheStream);
+
+    // игра.html — обычный текст, сжимать его дёшево и есть смысл (в разы
+    // меньше исходного размера). А вот аудио/фото ниже сжимаем без deflate —
+    // mp3/jpg и так уже сжаты форматом, повторное сжатие впустую грузит CPU
+    // маленького VPS и не даёт выигрыша в размере архива.
     archive.append(html, { name: 'игра.html' });
     log('игра.html добавлена в очередь архива');
 
     if (s3Enabled) {
+      // Собираем плоский список файлов на скачивание (аудио+фото по каждому
+      // треку) и разбираем его несколькими параллельными «воркерами» вместо
+      // строго последовательного цикла — это и есть основной выигрыш в скорости.
+      const jobs = [];
       for (const [tid, t] of Object.entries(data.tracks || {})) {
-        if (t.audioKey) {
+        if (t.audioKey) jobs.push({ tid, key: t.audioKey, kind: 'аудио', folder: 'audio', defExt: '.mp3' });
+        if (t.photoKey) jobs.push({ tid, key: t.photoKey, kind: 'фото', folder: 'photos', defExt: '.jpg' });
+      }
+      let jobIdx = 0;
+      async function worker() {
+        while (jobIdx < jobs.length) {
+          const job = jobs[jobIdx++];
           try {
-            log(`аудио ${tid}: запрос S3 начат, key=${t.audioKey}`);
-            const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: t.audioKey }));
-            log(`аудио ${tid}: ответ S3 получен`);
-            const ext = path.extname(t.audioKey) || '.mp3';
-            archive.append(obj.Body, { name: `audio/${tid}${ext}` });
-            log(`аудио ${tid}: добавлено в архив`);
-          } catch (e) { log(`аудио ${tid}: ОШИБКА S3:`, e.message); }
-        }
-        if (t.photoKey) {
-          try {
-            log(`фото ${tid}: запрос S3 начат, key=${t.photoKey}`);
-            const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: t.photoKey }));
-            log(`фото ${tid}: ответ S3 получен`);
-            const ext = path.extname(t.photoKey) || '.jpg';
-            archive.append(obj.Body, { name: `photos/${tid}${ext}` });
-            log(`фото ${tid}: добавлено в архив`);
-          } catch (e) { log(`фото ${tid}: ОШИБКА S3:`, e.message); }
+            log(`${job.kind} ${job.tid}: запрос S3 начат, key=${job.key}`);
+            const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: job.key }));
+            log(`${job.kind} ${job.tid}: ответ S3 получен`);
+            const ext = path.extname(job.key) || job.defExt;
+            archive.append(obj.Body, { name: `${job.folder}/${job.tid}${ext}`, store: true });
+            log(`${job.kind} ${job.tid}: добавлено в архив`);
+          } catch (e) { log(`${job.kind} ${job.tid}: ОШИБКА S3:`, e.message); }
         }
       }
+      const workerCount = Math.min(ZIP_S3_CONCURRENCY, jobs.length);
+      await Promise.all(Array.from({ length: workerCount }, worker));
     } else {
       log('s3Enabled=false — файлы не добавляются, только игра.html');
     }
@@ -376,6 +418,13 @@ app.get('/api/saved-games/:id/download', async (req, res) => {
     log('вызываю archive.finalize()');
     await archive.finalize();
     log('archive.finalize() промис разрешён');
+
+    cacheStream.on('close', () => {
+      if (cacheFailed) { fsp.unlink(tmpCachePath).catch(() => {}); return; }
+      fsp.rename(tmpCachePath, cachePath)
+        .then(() => log('кэш архива сохранён:', cachePath))
+        .catch(e => { log('кэш: не удалось сохранить (не критично):', e.message); fsp.unlink(tmpCachePath).catch(() => {}); });
+    });
   } catch (e) {
     log('ИСКЛЮЧЕНИЕ:', e.message);
     console.error(e);
