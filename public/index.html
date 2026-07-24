@@ -350,6 +350,8 @@
     <span class="time" id="syncCur">0:00</span>
     <div class="prog" id="syncProg"><div class="fill" id="syncFill"></div></div>
     <span class="time" id="syncDur">0:00</span>
+    <button class="sec" id="syncSetHook" title="Запомнить текущую позицию плеера как начало припева">♫ Припев здесь</button>
+    <span class="time" id="syncHookLabel">Припев: —</span>
   </div>
   <div class="sync-list" id="syncList"></div>
   <div class="sync-actions">
@@ -501,7 +503,7 @@ const show = v => ['vGrid','vPlay','vLib'].forEach(x=>$(x).classList.toggle('on'
 function activeRound(){ return settings.rounds[settings.activeRound]; }
 function tracksInCategory(cat){
   if(!cat) return [];
-  return bank.filter(t=>(t.categories&&t.categories.length?t.categories:['Общая']).includes(cat));
+  return bank.filter(t=>(t.categories||[]).includes(cat));
 }
 function roundsContaining(trackId){
   const res=[];
@@ -520,7 +522,7 @@ function fillCategorySelect(el, withNew){
 }
 function fillLibCatFilter(){
   const el=$('libCatFilter'); const cur=el.value;
-  el.innerHTML='<option value="">Все категории</option>';
+  el.innerHTML='<option value="">Все категории</option><option value="__none__">Без категории</option>';
   settings.categories.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; el.appendChild(o); });
   el.value=[...el.options].some(o=>o.value===cur)?cur:'';
 }
@@ -803,7 +805,8 @@ function renderLib(){
   const catF=$('libCatFilter')?$('libCatFilter').value:'';
   const box=$('libList'); box.innerHTML='';
   let list=bank.filter(t=>!q||(t.title||'').toLowerCase().includes(q)||(t.artist||'').toLowerCase().includes(q));
-  if(catF) list=list.filter(t=>(t.categories&&t.categories.length?t.categories:['Общая']).includes(catF));
+  if(catF==='__none__') list=list.filter(t=>!t.categories||!t.categories.length);
+  else if(catF) list=list.filter(t=>(t.categories||[]).includes(catF));
   if(libOnlyUnsynced) list=list.filter(isUnsynced);
   list=[...list];
   if(libSortMode==='date') list.sort((a,b)=>trackCreatedAt(b)-trackCreatedAt(a));
@@ -1334,6 +1337,7 @@ $('btnManual').onclick=()=>{
   syncMode=true;
   $('sync').classList.add('on'); renderSyncList();
   $('syncPlay').textContent='▶';
+  updateSyncHookLabel();
   if(curURL){ URL.revokeObjectURL(curURL); curURL=null; }
   if(t.audio instanceof Blob){ curURL=URL.createObjectURL(t.audio); audio.src=curURL; }
   else { audio.src=t.audioUrl; }
@@ -1342,6 +1346,19 @@ $('btnManual').onclick=()=>{
     $('syncDur').textContent=fmt(audio.duration);
     audio.currentTime=+t.hook||0;
   });
+};
+// Отметить текущую позицию плеера как начало припева прямо во время ручной
+// синхронизации — раньше это можно было указать только числом секунд на
+// форме трека, вслепую, не слушая аудио.
+function updateSyncHookLabel(){
+  const v=$('eHook').value;
+  $('syncHookLabel').textContent = (v && +v>0) ? ('Припев: '+fmt(+v)) : 'Припев: —';
+}
+$('syncSetHook').onclick=()=>{
+  const t=Math.max(0, audio.currentTime||0);
+  $('eHook').value=Math.round(t);
+  if(editing) editing.hook=t;
+  updateSyncHookLabel();
 };
 function renderSyncList(){
   const box=$('syncList'); box.innerHTML='';
@@ -1649,7 +1666,9 @@ async function checkLegacyImport(){
     if(loaded && loaded.rounds) settings=loaded;
     else saveSettings(); // на сервере ещё ничего нет — сохраняем дефолт, чтобы он там появился
   }catch(e){ console.error(e); }
-  bank.forEach(t=>{ if(!t.categories||!t.categories.length) t.categories=['Общая']; });
+  // Треки без выбранной категории больше НЕ приравниваются к «Общая» — это
+  // разные состояния: «Общая» выбирается явно, а без категории означает,
+  // что категорию ещё не назначили (см. фильтр «Без категории» в библиотеке).
   if(!settings.categories||!settings.categories.length) settings.categories=['Общая'];
   syncRoundControls(); renderRoundTabs(); renderGrid();
   checkLegacyImport();
