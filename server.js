@@ -299,14 +299,19 @@ app.delete('/api/saved-games/:id', (req, res) => {
 // прямо в архив как поток).
 const OFFLINE_TEMPLATE_PATH = path.join(__dirname, 'public', 'offline-template.html');
 app.get('/api/saved-games/:id/download', async (req, res) => {
+  const t0 = Date.now();
+  const log = (...args) => console.log(`[download ${req.params.id} +${Date.now() - t0}ms]`, ...args);
   try {
+    log('старт');
     const row = db.prepare('SELECT * FROM saved_games WHERE id = ?').get(req.params.id);
     if (!row) return res.status(404).json({ error: 'Игра не найдена' });
     const data = JSON.parse(row.data);
+    log('запись из БД получена, треков:', Object.keys(data.tracks || {}).length);
 
     let template;
     try { template = fs.readFileSync(OFFLINE_TEMPLATE_PATH, 'utf8'); }
     catch (e) { return res.status(500).json({ error: 'Оффлайн-шаблон не найден на сервере' }); }
+    log('шаблон прочитан, размер:', template.length);
 
     const offlineTracks = {};
     for (const [tid, t] of Object.entries(data.tracks || {})) {
@@ -324,39 +329,55 @@ app.get('/api/saved-games/:id/download', async (req, res) => {
       '/*__GAME_DATA__*/null',
       JSON.stringify(offlineData).replace(/</g, '\\u003c')
     );
+    log('HTML собран, размер:', html.length);
 
     const safeName = (row.name || 'game').replace(/[^a-zA-Zа-яА-Я0-9 _-]/g, '').trim() || 'game';
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}.zip"`);
 
     const archive = archiver('zip', { zlib: { level: 6 } });
-    archive.on('warning', w => console.warn('Архив (предупреждение):', w.message));
-    archive.on('error', err => { console.error('Ошибка сборки архива:', err); try { res.end(); } catch {} });
+    archive.on('warning', w => log('архив warning:', w.message));
+    archive.on('error', err => { log('архив error:', err.message); try { res.end(); } catch {} });
+    archive.on('entry', entry => log('архив entry добавлен:', entry.name));
+    archive.on('end', () => log('архив end (все данные переданы в поток)'));
+    res.on('close', () => log('res closed, headersSent=', res.headersSent, 'writableEnded=', res.writableEnded));
     archive.pipe(res);
 
     archive.append(html, { name: 'игра.html' });
+    log('игра.html добавлена в очередь архива');
 
     if (s3Enabled) {
       for (const [tid, t] of Object.entries(data.tracks || {})) {
         if (t.audioKey) {
           try {
+            log(`аудио ${tid}: запрос S3 начат, key=${t.audioKey}`);
             const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: t.audioKey }));
+            log(`аудио ${tid}: ответ S3 получен`);
             const ext = path.extname(t.audioKey) || '.mp3';
             archive.append(obj.Body, { name: `audio/${tid}${ext}` });
-          } catch (e) { console.warn(`Пропускаю аудио трека ${tid} (не найдено в S3):`, e.message); }
+            log(`аудио ${tid}: добавлено в архив`);
+          } catch (e) { log(`аудио ${tid}: ОШИБКА S3:`, e.message); }
         }
         if (t.photoKey) {
           try {
+            log(`фото ${tid}: запрос S3 начат, key=${t.photoKey}`);
             const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: t.photoKey }));
+            log(`фото ${tid}: ответ S3 получен`);
             const ext = path.extname(t.photoKey) || '.jpg';
             archive.append(obj.Body, { name: `photos/${tid}${ext}` });
-          } catch (e) { console.warn(`Пропускаю обложку трека ${tid} (не найдена в S3):`, e.message); }
+            log(`фото ${tid}: добавлено в архив`);
+          } catch (e) { log(`фото ${tid}: ОШИБКА S3:`, e.message); }
         }
       }
+    } else {
+      log('s3Enabled=false — файлы не добавляются, только игра.html');
     }
 
+    log('вызываю archive.finalize()');
     await archive.finalize();
+    log('archive.finalize() промис разрешён');
   } catch (e) {
+    log('ИСКЛЮЧЕНИЕ:', e.message);
     console.error(e);
     if (!res.headersSent) res.status(500).json({ error: e.message });
     else { try { res.end(); } catch {} }
