@@ -568,11 +568,46 @@ app.get('/api/cover-proxy', async (req, res) => {
   }
 });
 
+// Разбор HTML-страницы Genius (структура одинаковая что при заходе через
+// официальный API, что при обычной ссылке из веб-поиска) — самый надёжный
+// источник текста из всех, что у нас есть, потому что верстка Genius строго
+// размечает именно блок с текстом (data-lyrics-container), а не угадывает
+// эвристикой, как для произвольных сайтов.
+function parseGeniusHtml(html) {
+  const blocks = [...html.matchAll(/<div[^>]*data-lyrics-container="true"[^>]*>([\s\S]*?)<\/div>\s*(?:<div|<\/div>)/g)];
+  if (!blocks.length) return null;
+  const text = blocks.map(b => b[1])
+    .join('\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<a[^>]*>|<\/a>/gi, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\[[^\]]*\]/g, '') // убираем пометки вида [Verse 1], [Chorus]
+    .replace(/&amp;/g, '&').replace(/&#x27;/g, "'").replace(/&quot;/g, '"')
+    .split('\n').map(s => s.trim()).filter(Boolean).join('\n');
+  return text || null;
+}
+const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
+
+// Загружает конкретную страницу genius.com и парсит её тем же способом —
+// используется, когда ссылку на Genius находит обычный веб-поиск (без API/токена).
+async function tryGeniusPage(url) {
+  try {
+    const pageR = await fetch(url, { headers: { 'User-Agent': WEB_UA } });
+    if (!pageR.ok) return null;
+    return parseGeniusHtml(await pageR.text());
+  } catch (e) {
+    console.warn('Не удалось разобрать страницу Genius:', e.message);
+    return null;
+  }
+}
+
 // Genius: официальный API отдаёт только ссылку на страницу песни (сам текст
 // через API не отдают специально), поэтому текст достаём из HTML страницы —
 // тот же приём, что используют почти все подобные интеграции с Genius.
 // Нужен бесплатный токен (GENIUS_ACCESS_TOKEN) — получить на genius.com/api-clients.
-// Если токен не задан, этот источник просто пропускается.
+// Если токен не задан, этот источник просто пропускается (см. также
+// tryGeniusPage — она находит и парсит страницы Genius и без токена, через
+// обычный веб-поиск).
 async function tryGenius(artist, title) {
   if (!process.env.GENIUS_ACCESS_TOKEN) return null;
   try {
@@ -583,24 +618,7 @@ async function tryGenius(artist, title) {
     const searchData = await searchR.json();
     const hit = searchData?.response?.hits?.[0]?.result;
     if (!hit?.url) return null;
-
-    const pageR = await fetch(hit.url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36' }
-    });
-    if (!pageR.ok) return null;
-    const html = await pageR.text();
-
-    const blocks = [...html.matchAll(/<div[^>]*data-lyrics-container="true"[^>]*>([\s\S]*?)<\/div>\s*(?:<div|<\/div>)/g)];
-    if (!blocks.length) return null;
-    const text = blocks.map(b => b[1])
-      .join('\n')
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<a[^>]*>|<\/a>/gi, '')
-      .replace(/<[^>]+>/g, '')
-      .replace(/\[[^\]]*\]/g, '') // убираем пометки вида [Verse 1], [Chorus]
-      .replace(/&amp;/g, '&').replace(/&#x27;/g, "'").replace(/&quot;/g, '"')
-      .split('\n').map(s => s.trim()).filter(Boolean).join('\n');
-    return text || null;
+    return await tryGeniusPage(hit.url);
   } catch (e) {
     console.warn('Genius не сработал:', e.message);
     return null;
@@ -614,9 +632,11 @@ async function tryGenius(artist, title) {
 // чёрного списка (YouTube/соцсети/Яндекс.Музыка и т.д.) и вытаскиваем текст
 // эвристикой: ищем самый длинный подряд идущий блок «строчек как в песне»
 // (короткие, без мусора вроде cookie-баннеров и меню сайта).
+// genius.com сюда специально НЕ входит — для него есть отдельный, гораздо более
+// точный разбор по вёрстке (parseGeniusHtml/tryGeniusPage), а не эвристика ниже.
 const LYRICS_SEARCH_BLOCKLIST = [
   'youtube.com', 'youtu.be', 'music.yandex', 'yandex.ru/video', 'spotify.com',
-  'vk.com', 'wikipedia.org', 'genius.com', 'apple.com/ru/music',
+  'vk.com', 'wikipedia.org', 'apple.com/ru/music',
   'facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'ok.ru', 'tiktok.com'
 ];
 const LYRICS_JUNK_LINE = /(cookie|реклам|войти\b|регистрац|подписат|правообладател|copyright|©|все права защищены|поделиться|коммент|javascript|подпис[а-я]*ся|скачать|mp3|плеер|найдено|результат[ыа]? поиска)/i;
@@ -675,6 +695,13 @@ async function trySearchWeb(artist, title) {
     for (const candidate of urls) {
       if (LYRICS_SEARCH_BLOCKLIST.some(b => candidate.includes(b))) continue;
       try {
+        // Genius — самая чистая вёрстка из всех, разбираем её отдельным точным
+        // парсером вместо общей эвристики «похоже на текст песни».
+        if (candidate.includes('genius.com')) {
+          const lyrics = await tryGeniusPage(candidate);
+          if (lyrics) return { lyrics, sourceUrl: candidate };
+          continue;
+        }
         const pageR = await fetch(candidate, { headers });
         if (!pageR.ok) continue;
         const pageHtml = await pageR.text();
@@ -689,15 +716,36 @@ async function trySearchWeb(artist, title) {
   }
 }
 
-// Текст песни: сначала бесплатный lyrics.ovh, затем Яндекс.Музыка, затем
-// веб-поиск (как в Google — без аккаунтов и токенов), и напоследок Genius
-// (если когда-нибудь будет задан токен) — независимые источники подряд,
-// чтобы редкие тексты с большей вероятностью находились автоматически. Если
-// ни один не нашёл — фронт оставит поле пустым, текст впишется вручную.
+// Текст песни: порядок источников зависит от языка. lyrics.ovh — англоязычная
+// база с нечётким сопоставлением по названию: для русских треков она нередко
+// подсовывала текст совсем другой песни с похожим названием, поэтому для
+// кириллицы её пропускаем и идём сразу в Яндекс.Музыку — тот же лицензированный
+// источник текста, что показывает сам сервис (через scripts/ym_lookup.py,
+// официальный supplement-API трека, а не догадки по HTML). Дальше в любом
+// случае — веб-поиск (включая точный разбор Genius-страниц, если найдутся) и,
+// напоследок, Genius по официальному API (если когда-нибудь будет токен).
+// Если ни один источник не нашёл — фронт оставит поле пустым, текст впишется вручную.
 app.get('/api/lyrics', async (req, res) => {
   const artist = (req.query.artist || '').trim();
   const title = (req.query.title || '').trim();
   if (!artist || !title) return res.status(400).json({ error: 'Нужны artist и title' });
+
+  const isCyrillic = /[а-яё]/i.test(artist + title);
+
+  async function tryYandexLyrics() {
+    try {
+      const result = await runYandexScript('lyrics', `${artist} ${title}`.trim());
+      if (!result.error && result.lyrics && result.lyrics.trim()) return result.lyrics.trim();
+    } catch (e) {
+      console.warn('Яндекс.Музыка (текст) недоступна:', e.message);
+    }
+    return null;
+  }
+
+  if (isCyrillic) {
+    const yandexLyrics = await tryYandexLyrics();
+    if (yandexLyrics) return res.json({ lyrics: yandexLyrics, source: 'yandex' });
+  }
 
   try {
     const r = await fetch(
@@ -706,16 +754,12 @@ app.get('/api/lyrics', async (req, res) => {
     const data = await r.json().catch(() => ({}));
     if (r.ok && data.lyrics) return res.json({ lyrics: data.lyrics.trim(), source: 'lyrics.ovh' });
   } catch (e) {
-    console.warn('lyrics.ovh недоступен, пробуем Яндекс.Музыку:', e.message);
+    console.warn('lyrics.ovh недоступен:', e.message);
   }
 
-  try {
-    const result = await runYandexScript('lyrics', `${artist} ${title}`.trim());
-    if (!result.error && result.lyrics) {
-      return res.json({ lyrics: result.lyrics.trim(), source: 'yandex' });
-    }
-  } catch (e) {
-    console.warn('Яндекс.Музыка (текст) недоступна:', e.message);
+  if (!isCyrillic) {
+    const yandexLyrics = await tryYandexLyrics();
+    if (yandexLyrics) return res.json({ lyrics: yandexLyrics, source: 'yandex' });
   }
 
   try {
@@ -821,6 +865,19 @@ function runYtDlp(args) {
   });
 }
 
+// То же самое, но никогда не реджектит (ошибку спавна превращает в code=-1) —
+// удобно для параллельного запуска нескольких попыток разом (см. ниже).
+function spawnYtDlpTracked(args) {
+  const proc = spawn('yt-dlp', args);
+  let stderr = '';
+  proc.stderr.on('data', d => { stderr += d; });
+  const promise = new Promise(resolve => {
+    proc.on('error', (e) => resolve({ code: -1, stderr, spawnError: e.message }));
+    proc.on('close', code => resolve({ code, stderr }));
+  });
+  return { proc, promise };
+}
+
 app.get('/api/fetch-audio', async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
@@ -850,44 +907,69 @@ app.get('/api/fetch-audio', async (req, res) => {
   const target = isUrl ? q : `ytsearch5:${q}`;
   const base = path.join(os.tmpdir(), `yt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
-  const baseArgs = [
-    target,
-    '--no-playlist',
-    '-f', 'bestaudio[ext=m4a]/bestaudio/best',
-    '--max-filesize', '20m',
-    '--no-warnings',
-    '-o', `${base}.%(ext)s`
-  ];
-  if (!isUrl) {
-    baseArgs.push('--match-filter', 'duration < 600', '--max-downloads', '1');
-  }
+  const buildArgs = (attemptBase, client) => {
+    const args = [
+      target,
+      '--no-playlist',
+      '-f', 'bestaudio[ext=m4a]/bestaudio/best',
+      '--max-filesize', '20m',
+      '--no-warnings',
+      '-o', `${attemptBase}.%(ext)s`
+    ];
+    if (!isUrl) args.push('--match-filter', 'duration < 600', '--max-downloads', '1');
+    if (client) args.push('--extractor-args', `youtube:player_client=${client}`);
+    return args;
+  };
 
   // YouTube в последнее время часто отвечает "HTTP Error 403: Forbidden" на
   // запросы с серверных/датацентровых IP, если yt-dlp представляется обычным
   // веб-плеером. Разные "клиенты" (android/ios/tv) получают отдельные, не
-  // всегда так же ограниченные потоки — пробуем по очереди, пока один не
-  // сработает, вместо того чтобы сразу сдаваться после первой ошибки.
+  // всегда так же ограниченные потоки. Раньше пробовали по очереди — что в
+  // худшем случае означало 3-4 полных таймаута подряд. Теперь запускаем все
+  // варианты ОДНОВРЕМЕННО (каждый — в свой временный файл) и берём первый,
+  // что реально скачался; проигравших сразу убиваем и подчищаем их файлы.
   const clientAttempts = ['android,web', 'ios,web', 'tv,web', null];
-  let result = null;
-  for (const client of clientAttempts) {
-    const args = client ? [...baseArgs, '--extractor-args', `youtube:player_client=${client}`] : baseArgs;
-    try {
-      result = await runYtDlp(args);
-    } catch (e) {
-      console.error('yt-dlp не найден:', e.message);
-      return res.status(500).json({ error: 'yt-dlp не установлен на сервере (нужен Docker-деплой, см. README)' });
-    }
-    if (result.code === 0) break;
-    console.error(`yt-dlp error (client=${client || 'default'}):`, result.stderr);
-  }
+  const attempts = clientAttempts.map((client, i) => {
+    const attemptBase = `${base}-${i}`;
+    const { proc, promise } = spawnYtDlpTracked(buildArgs(attemptBase, client));
+    return { client, base: attemptBase, proc, promise };
+  });
 
-  if (!result || result.code !== 0) {
+  let winner = null;
+  await new Promise(resolveAll => {
+    let settled = 0;
+    attempts.forEach(a => {
+      a.promise.then(r => {
+        settled++;
+        if (r.code === 0 && !winner) {
+          winner = a;
+          attempts.forEach(o => { if (o !== a) { try { o.proc.kill(); } catch {} } });
+          resolveAll();
+        } else {
+          if (r.spawnError) console.error('yt-dlp не найден:', r.spawnError);
+          else if (r.code !== 0) console.error(`yt-dlp error (client=${a.client || 'default'}):`, r.stderr);
+          if (settled === attempts.length && !winner) resolveAll();
+        }
+      });
+    });
+  });
+
+  // Подчищаем файлы всех проигравших попыток (если что-то успели записать до kill).
+  attempts.forEach(a => {
+    if (a === winner) return;
+    const dir = path.dirname(a.base), prefix = path.basename(a.base);
+    fsp.readdir(dir).then(files => {
+      files.filter(f => f.startsWith(prefix)).forEach(f => fsp.unlink(path.join(dir, f)).catch(() => {}));
+    }).catch(() => {});
+  });
+
+  if (!winner) {
     return res.status(502).json({ error: 'Видео не найдено или не удалось скачать' });
   }
 
   try {
-    const dir = path.dirname(base);
-    const prefix = path.basename(base);
+    const dir = path.dirname(winner.base);
+    const prefix = path.basename(winner.base);
     const files = await fsp.readdir(dir);
     const outName = files.find(f => f.startsWith(prefix));
     if (!outName) {
