@@ -440,10 +440,93 @@ async function tryGenius(artist, title) {
   }
 }
 
-// Текст песни: сначала бесплатный lyrics.ovh, затем Яндекс.Музыка, затем Genius
-// (если задан токен) — три независимых источника подряд, чтобы редкие тексты
-// с большей вероятностью находились автоматически. Если ни один не нашёл —
-// фронт оставит поле пустым, текст впишется вручную, как и раньше.
+// Веб-поиск текста (как если бы человек сам погуглил "исполнитель название
+// текст песни" и открыл первый подходящий сайт) — работает без токенов и
+// без входа в чей-либо аккаунт. Используем HTML-версию DuckDuckGo (не требует
+// JS, не банит так агрессивно, как обычный Google), берём первую ссылку не из
+// чёрного списка (YouTube/соцсети/Яндекс.Музыка и т.д.) и вытаскиваем текст
+// эвристикой: ищем самый длинный подряд идущий блок «строчек как в песне»
+// (короткие, без мусора вроде cookie-баннеров и меню сайта).
+const LYRICS_SEARCH_BLOCKLIST = [
+  'youtube.com', 'youtu.be', 'music.yandex', 'yandex.ru/video', 'spotify.com',
+  'vk.com', 'wikipedia.org', 'genius.com', 'apple.com/ru/music',
+  'facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'ok.ru', 'tiktok.com'
+];
+const LYRICS_JUNK_LINE = /(cookie|реклам|войти\b|регистрац|подписат|правообладател|copyright|©|все права защищены|поделиться|коммент|javascript|подпис[а-я]*ся|скачать|mp3|плеер|найдено|результат[ыа]? поиска)/i;
+
+function extractLyricsHeuristic(html, requireCyrillic) {
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<(nav|header|footer)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;|&#x27;/g, "'")
+    .replace(/&quot;/g, '"').replace(/&mdash;/g, '—').replace(/&ndash;/g, '–');
+
+  const rawLines = text.split('\n').map(s => s.trim());
+  let best = [], current = [];
+  const scoreOf = (arr) => arr.length >= 8 ? arr.length : 0;
+
+  for (const line of rawLines) {
+    const looksLikeLyricLine = line.length > 0 && line.length <= 60
+      && !/^(https?:|www\.)/i.test(line) && !LYRICS_JUNK_LINE.test(line);
+    if (looksLikeLyricLine) {
+      current.push(line);
+    } else {
+      if (scoreOf(current) > scoreOf(best)) best = current;
+      current = [];
+    }
+  }
+  if (scoreOf(current) > scoreOf(best)) best = current;
+  if (best.length < 8) return null;
+
+  if (requireCyrillic) {
+    const withCyrillic = best.filter(l => /[а-яё]/i.test(l)).length;
+    if (withCyrillic / best.length < 0.5) return null;
+  }
+  return best.join('\n');
+}
+
+async function trySearchWeb(artist, title) {
+  try {
+    const q = encodeURIComponent(`${artist} ${title} текст песни`);
+    const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36' };
+    const searchR = await fetch(`https://html.duckduckgo.com/html/?q=${q}`, { headers });
+    if (!searchR.ok) return null;
+    const searchHtml = await searchR.text();
+
+    const rawLinks = [...searchHtml.matchAll(/class="result__a"[^>]*href="([^"]+)"/g)].map(m => m[1]);
+    const urls = rawLinks.map(u => {
+      const m = u.match(/uddg=([^&]+)/);
+      try { return m ? decodeURIComponent(m[1]) : decodeURIComponent(u); } catch { return u; }
+    }).filter(u => u.startsWith('http'));
+
+    const requireCyrillic = /[а-яё]/i.test(artist + title);
+    for (const candidate of urls) {
+      if (LYRICS_SEARCH_BLOCKLIST.some(b => candidate.includes(b))) continue;
+      try {
+        const pageR = await fetch(candidate, { headers });
+        if (!pageR.ok) continue;
+        const pageHtml = await pageR.text();
+        const lyrics = extractLyricsHeuristic(pageHtml, requireCyrillic);
+        if (lyrics) return { lyrics, sourceUrl: candidate };
+      } catch { /* пробуем следующую ссылку */ }
+    }
+    return null;
+  } catch (e) {
+    console.warn('Веб-поиск текста не сработал:', e.message);
+    return null;
+  }
+}
+
+// Текст песни: сначала бесплатный lyrics.ovh, затем Яндекс.Музыка, затем
+// веб-поиск (как в Google — без аккаунтов и токенов), и напоследок Genius
+// (если когда-нибудь будет задан токен) — независимые источники подряд,
+// чтобы редкие тексты с большей вероятностью находились автоматически. Если
+// ни один не нашёл — фронт оставит поле пустым, текст впишется вручную.
 app.get('/api/lyrics', async (req, res) => {
   const artist = (req.query.artist || '').trim();
   const title = (req.query.title || '').trim();
@@ -466,6 +549,17 @@ app.get('/api/lyrics', async (req, res) => {
     }
   } catch (e) {
     console.warn('Яндекс.Музыка (текст) недоступна:', e.message);
+  }
+
+  try {
+    const webResult = await trySearchWeb(artist, title);
+    if (webResult && webResult.lyrics) {
+      let host = webResult.sourceUrl;
+      try { host = new URL(webResult.sourceUrl).hostname; } catch {}
+      return res.json({ lyrics: webResult.lyrics.trim(), source: `web:${host}` });
+    }
+  } catch (e) {
+    console.warn('Веб-поиск (текст) недоступен:', e.message);
   }
 
   try {
