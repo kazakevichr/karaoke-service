@@ -1580,6 +1580,52 @@ async function apiSaveGame(name){
 }
 async function apiDeleteSavedGame(id){ await fetch('/api/saved-games/'+encodeURIComponent(id), { method:'DELETE' }); }
 
+function fmtBytes(n){
+  if(!n) return '';
+  if(n<1024*1024) return (n/1024).toFixed(0)+' КБ';
+  return (n/1024/1024).toFixed(1)+' МБ';
+}
+
+/* Скачивание архива через fetch (а не прямую ссылку) — чтобы показать
+   реальный статус: пока сервер собирает архив (ещё нет Content-Length —
+   значит это первая, «холодная» сборка) показываем «Готовим архив…», а
+   как только заголовки пришли — честный прогресс в МБ/проценты по мере
+   получения байтов. Файл целиком собирается в памяти (Blob) и сохраняется
+   через скрытую ссылку — для игр в разумных пределах (сотни МБ) это ок. */
+async function downloadSavedGame(id, name, statusEl, btnEl){
+  btnEl.disabled = true;
+  statusEl.textContent = 'Готовим архив… (может занять до минуты при первом скачивании)';
+  try{
+    const resp = await fetch('/api/saved-games/'+encodeURIComponent(id)+'/download');
+    if(!resp.ok) throw new Error('Сервер ответил ошибкой ('+resp.status+')');
+    const total = +resp.headers.get('Content-Length') || 0;
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let received = 0;
+    while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      chunks.push(value);
+      received += value.length;
+      statusEl.textContent = total
+        ? `Скачивается: ${fmtBytes(received)} из ${fmtBytes(total)} (${Math.round(received/total*100)}%)`
+        : `Скачивается: ${fmtBytes(received)}`;
+    }
+    const blob = new Blob(chunks, {type:'application/zip'});
+    const url = URL.createObjectURL(blob);
+    const safeName = (name||'game').replace(/[\\/:*?"<>|]/g,'').trim() || 'game';
+    const a = document.createElement('a');
+    a.href = url; a.download = safeName+'.zip';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 10000);
+    statusEl.textContent = 'Готово: '+fmtBytes(blob.size);
+  }catch(e){
+    statusEl.textContent = 'Ошибка скачивания: '+e.message;
+  }finally{
+    btnEl.disabled = false;
+  }
+}
+
 $('btnSaveGame').onclick = async () => {
   const name = prompt('Название игры (например: «День рождения Маши»)');
   if(!name || !name.trim()) return;
@@ -1601,9 +1647,12 @@ async function renderSavedGames(){
   }
   list.forEach(g=>{
     const row=document.createElement('div'); row.className='sg-row';
-    row.innerHTML=`<div class="tt">${escapeHtml(g.name)}<small>${new Date(g.createdAt).toLocaleString('ru')} · ${g.roundsCount} раунд(ов) · ${g.trackCount} треков</small></div>
-      <a class="sec" href="/api/saved-games/${encodeURIComponent(g.id)}/download" download>Скачать игру</a>
+    row.innerHTML=`<div class="tt">${escapeHtml(g.name)}<small>${new Date(g.createdAt).toLocaleString('ru')} · ${g.roundsCount} раунд(ов) · ${g.trackCount} треков</small>
+        <small data-dl-status style="display:block"></small></div>
+      <button class="sec" data-dl>Скачать игру</button>
       <button class="gh" data-del>Удалить</button>`;
+    const dlBtn=row.querySelector('[data-dl]'), dlStatus=row.querySelector('[data-dl-status]');
+    dlBtn.onclick=()=>downloadSavedGame(g.id, g.name, dlStatus, dlBtn);
     row.querySelector('[data-del]').onclick=async()=>{
       if(!confirm(`Удалить сохранённую игру «${g.name}»? Уже скачанные ранее архивы не пострадают.`)) return;
       await apiDeleteSavedGame(g.id);
