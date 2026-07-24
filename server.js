@@ -10,7 +10,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const { spawn } = require('child_process');
 const Database = require('better-sqlite3');
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 
 const app = express();
 app.use(cors());
@@ -169,6 +169,24 @@ app.post('/api/tracks/:id/photo', (req, res) => {
       res.json({ url: s3PublicUrl(key) });
     } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
   });
+});
+
+// Прокси аудио уже сохранённого трека через сервер — используется только для
+// повторного авто-синхрона (нужно отдать байты в /api/transcribe). Обычное
+// воспроизведение в плеере идёт напрямую по S3-ссылке (audioUrl) и этого
+// прокси не касается — <audio src> не подчиняется CORS, а вот JS fetch()
+// из браузера напрямую на S3 упирается в отсутствие CORS-заголовков у
+// бакета, поэтому байты забираем здесь, на сервере (CORS — чисто браузерное
+// ограничение, серверных запросов оно не касается).
+app.get('/api/tracks/:id/audio-file', async (req, res) => {
+  try {
+    if (!s3Enabled) return res.status(500).json({ error: 'S3 не настроен на сервере' });
+    const row = db.prepare('SELECT audioKey, audioType FROM tracks WHERE id = ?').get(req.params.id);
+    if (!row || !row.audioKey) return res.status(404).json({ error: 'Аудио не найдено' });
+    const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: row.audioKey }));
+    res.set('Content-Type', row.audioType || 'audio/mpeg');
+    obj.Body.pipe(res);
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/tracks/:id', async (req, res) => {
@@ -383,9 +401,49 @@ app.get('/api/cover-proxy', async (req, res) => {
   }
 });
 
-// Текст песни: сначала бесплатный lyrics.ovh, при неудаче — Яндекс.Музыка как
-// запасной источник. Если оба не нашли — фронт оставит поле пустым, текст
-// впишется вручную, как и раньше.
+// Genius: официальный API отдаёт только ссылку на страницу песни (сам текст
+// через API не отдают специально), поэтому текст достаём из HTML страницы —
+// тот же приём, что используют почти все подобные интеграции с Genius.
+// Нужен бесплатный токен (GENIUS_ACCESS_TOKEN) — получить на genius.com/api-clients.
+// Если токен не задан, этот источник просто пропускается.
+async function tryGenius(artist, title) {
+  if (!process.env.GENIUS_ACCESS_TOKEN) return null;
+  try {
+    const searchR = await fetch(`https://api.genius.com/search?q=${encodeURIComponent(`${artist} ${title}`)}`, {
+      headers: { Authorization: `Bearer ${process.env.GENIUS_ACCESS_TOKEN}` }
+    });
+    if (!searchR.ok) return null;
+    const searchData = await searchR.json();
+    const hit = searchData?.response?.hits?.[0]?.result;
+    if (!hit?.url) return null;
+
+    const pageR = await fetch(hit.url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36' }
+    });
+    if (!pageR.ok) return null;
+    const html = await pageR.text();
+
+    const blocks = [...html.matchAll(/<div[^>]*data-lyrics-container="true"[^>]*>([\s\S]*?)<\/div>\s*(?:<div|<\/div>)/g)];
+    if (!blocks.length) return null;
+    const text = blocks.map(b => b[1])
+      .join('\n')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<a[^>]*>|<\/a>/gi, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\[[^\]]*\]/g, '') // убираем пометки вида [Verse 1], [Chorus]
+      .replace(/&amp;/g, '&').replace(/&#x27;/g, "'").replace(/&quot;/g, '"')
+      .split('\n').map(s => s.trim()).filter(Boolean).join('\n');
+    return text || null;
+  } catch (e) {
+    console.warn('Genius не сработал:', e.message);
+    return null;
+  }
+}
+
+// Текст песни: сначала бесплатный lyrics.ovh, затем Яндекс.Музыка, затем Genius
+// (если задан токен) — три независимых источника подряд, чтобы редкие тексты
+// с большей вероятностью находились автоматически. Если ни один не нашёл —
+// фронт оставит поле пустым, текст впишется вручную, как и раньше.
 app.get('/api/lyrics', async (req, res) => {
   const artist = (req.query.artist || '').trim();
   const title = (req.query.title || '').trim();
@@ -408,6 +466,13 @@ app.get('/api/lyrics', async (req, res) => {
     }
   } catch (e) {
     console.warn('Яндекс.Музыка (текст) недоступна:', e.message);
+  }
+
+  try {
+    const geniusText = await tryGenius(artist, title);
+    if (geniusText) return res.json({ lyrics: geniusText, source: 'genius' });
+  } catch (e) {
+    console.warn('Genius (текст) недоступен:', e.message);
   }
 
   res.status(404).json({ error: 'Текст не найден' });
