@@ -605,17 +605,25 @@ function parseGeniusHtml(html) {
   let lines = blocks
     .join('\n')
     .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<\/div>/gi, '\n') // границы служебных виджетов (заголовок, аннотация) — тоже разделитель
     .replace(/<a[^>]*>|<\/a>/gi, '')
     .replace(/<[^>]+>/g, '')
     .replace(/\[[^\]]*\]/g, '') // убираем пометки вида [Verse 1], [Chorus]
     .replace(/&amp;/g, '&').replace(/&#x27;/g, "'").replace(/&quot;/g, '"')
     .split('\n').map(s => s.trim()).filter(Boolean);
   // Перед самим текстом в том же контейнере иногда лежит служебная шапка
-  // страницы («12 ContributorsTranslationsRomanization<Название> Lyrics») —
-  // склеенная в одну строку без пробелов (в разметке между этими виджетами
-  // нет <br>, в отличие от настоящих строк песни). Отличить легко: это
-  // единственная строка, которая заканчивается на английское «Lyrics».
-  if (lines.length && /lyrics$/i.test(lines[0]) && lines[0].length < 200) lines = lines.slice(1);
+  // страницы («12 ContributorsTranslationsRomanization<Название> Lyrics») и/или
+  // абзац-аннотация об истории песни — срезаем такие строки в начале (не больше
+  // 3, чтобы случайно не задеть настоящий куплет): служебная шапка почти всегда
+  // содержит «Contributors» или заканчивается английским «Lyrics», а
+  // аннотация обычно заметно длиннее одной строки куплета.
+  let stripped = 0;
+  while (lines.length && stripped < 3 &&
+         (/\blyrics\b/i.test(lines[0]) || /\bcontributors?\b/i.test(lines[0]) || lines[0].length > 160)) {
+    lines = lines.slice(1);
+    stripped++;
+  }
   const text = lines.join('\n');
   // Если вышло подозрительно коротко (пара строк служебного текста, а не
   // куплет) — считаем, что разбор не удался, а не отдаём огрызок.
