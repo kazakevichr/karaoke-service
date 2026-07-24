@@ -602,17 +602,24 @@ function extractGeniusContainers(html) {
 function parseGeniusHtml(html) {
   const blocks = extractGeniusContainers(html);
   if (!blocks.length) return null;
-  const text = blocks
+  let lines = blocks
     .join('\n')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<a[^>]*>|<\/a>/gi, '')
     .replace(/<[^>]+>/g, '')
     .replace(/\[[^\]]*\]/g, '') // убираем пометки вида [Verse 1], [Chorus]
     .replace(/&amp;/g, '&').replace(/&#x27;/g, "'").replace(/&quot;/g, '"')
-    .split('\n').map(s => s.trim()).filter(Boolean).join('\n');
+    .split('\n').map(s => s.trim()).filter(Boolean);
+  // Перед самим текстом в том же контейнере иногда лежит служебная шапка
+  // страницы («12 ContributorsTranslationsRomanization<Название> Lyrics») —
+  // склеенная в одну строку без пробелов (в разметке между этими виджетами
+  // нет <br>, в отличие от настоящих строк песни). Отличить легко: это
+  // единственная строка, которая заканчивается на английское «Lyrics».
+  if (lines.length && /lyrics$/i.test(lines[0]) && lines[0].length < 200) lines = lines.slice(1);
+  const text = lines.join('\n');
   // Если вышло подозрительно коротко (пара строк служебного текста, а не
   // куплет) — считаем, что разбор не удался, а не отдаём огрызок.
-  if (!text || text.split('\n').length < 4) return null;
+  if (!text || lines.length < 4) return null;
   return text;
 }
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
