@@ -405,17 +405,36 @@
 <audio id="audio"></audio>
 
 <script>
-/* ========== БД: банк треков ========== */
-const DBN='karaoke_db', STORE='tracks';
-function idb(){return new Promise((res,rej)=>{const r=indexedDB.open(DBN,1);
-  r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains(STORE))r.result.createObjectStore(STORE,{keyPath:'id'});};
-  r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error);});}
-async function dbAll(){const d=await idb();return new Promise((res,rej)=>{const q=d.transaction(STORE).objectStore(STORE).getAll();
-  q.onsuccess=()=>res(q.result||[]); q.onerror=()=>rej(q.error);});}
-async function dbPut(o){const d=await idb();return new Promise((res,rej)=>{const t=d.transaction(STORE,'readwrite');
-  t.objectStore(STORE).put(o); t.oncomplete=()=>res(); t.onerror=()=>rej(t.error);});}
-async function dbDel(id){const d=await idb();return new Promise((res,rej)=>{const t=d.transaction(STORE,'readwrite');
-  t.objectStore(STORE).delete(id); t.oncomplete=()=>res(); t.onerror=()=>rej(t.error);});}
+/* ========== Банк треков и настройки — общие, на сервере ==========
+   Раньше всё это (сами аудиофайлы/обложки и настройки раундов) хранилось в
+   IndexedDB/localStorage самого браузера — из-за этого банк был виден только
+   с одного устройства. Теперь метаданные и раунды лежат в базе на сервере,
+   а сами файлы — в S3-хранилище; банк общий для любого браузера/устройства,
+   у которого есть ссылка на сервис. Старые localStorage/IndexedDB-функции
+   ниже (legacy*) оставлены только для одноразового переноса того, что уже
+   успели загрузить в конкретном браузере ДО этого перехода — см.
+   checkLegacyImport() в конце файла. */
+async function apiGetTracks(){ const r=await fetch('/api/tracks'); if(!r.ok) throw new Error('Не удалось загрузить банк треков с сервера'); return r.json(); }
+async function apiSaveTrackMeta(t){
+  const r=await fetch('/api/tracks/'+encodeURIComponent(t.id), { method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ title:t.title, artist:t.artist, album:t.album, hook:t.hook, lyrics:t.lyrics,
+      lines:t.lines, syncPct:t.syncPct, categories:t.categories, createdAt:t.createdAt }) });
+  if(!r.ok) throw new Error((await r.json().catch(()=>({}))).error || 'Не удалось сохранить трек на сервере');
+  return r.json();
+}
+async function apiUploadAudio(id, file){
+  const fd=new FormData(); fd.append('audio', file, file.name||'audio');
+  const r=await fetch('/api/tracks/'+encodeURIComponent(id)+'/audio', { method:'POST', body:fd });
+  if(!r.ok) throw new Error((await r.json().catch(()=>({}))).error || 'Не удалось загрузить аудио на сервер');
+  return (await r.json()).url;
+}
+async function apiUploadPhoto(id, blob){
+  const fd=new FormData(); fd.append('photo', blob, 'cover.jpg');
+  const r=await fetch('/api/tracks/'+encodeURIComponent(id)+'/photo', { method:'POST', body:fd });
+  if(!r.ok) throw new Error((await r.json().catch(()=>({}))).error || 'Не удалось загрузить обложку на сервер');
+  return (await r.json()).url;
+}
+async function apiDeleteTrack(id){ await fetch('/api/tracks/'+encodeURIComponent(id), { method:'DELETE' }); }
 
 /* ========== Настройки: раунды и категории ==========
    Игра = 3 раунда (settings.rounds[0..2]). У каждого раунда своя тематика
@@ -424,12 +443,18 @@ async function dbDel(id){const d=await idb();return new Promise((res,rej)=>{cons
    Категория — это просто тег на треке (settings.categories: ['Общая','90-е',...]),
    трек может носить сразу несколько тегов. При старте раунда сервис случайно
    берёт N треков из пула нужной категории и раскладывает их по числам. */
-const SET='karaoke_settings_v2';
 function freshRound(){ return { category:'', size:30, map:{}, played:{}, history:[], blanks:null }; }
-const settings = Object.assign(
-  { categories:['Общая'], activeRound:0 },
-  JSON.parse(localStorage.getItem(SET)||'{}'));
-const saveSettings = () => localStorage.setItem(SET, JSON.stringify(settings));
+let settings = { categories:['Общая'], activeRound:0, rounds:[freshRound(),freshRound(),freshRound()] };
+async function apiGetSettings(){ const r=await fetch('/api/settings'); if(!r.ok) return null; return r.json(); }
+function saveSettings(){
+  // Fire-and-forget, как раньше с localStorage — не блокируем интерфейс на
+  // каждое действие. Важно: при одновременной работе нескольких администраторов
+  // с разных устройств возможна гонка (кто сохранил последним — тот и победил),
+  // это сознательное упрощение первой версии общего банка, не полноценная
+  // синхронизация в реальном времени через сокеты.
+  fetch('/api/settings', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(settings) })
+    .catch(e=>console.error('Не удалось сохранить настройки на сервере:', e));
+}
 
 let bank = [];              // все треки
 let editing = null;         // редактируемый трек банка
@@ -635,9 +660,11 @@ async function openTrack(t, number){
   $('zBadge').textContent = number?'№'+number:'';
   if(curPhotoURL){ URL.revokeObjectURL(curPhotoURL); curPhotoURL=null; }
   $('zonePhoto').innerHTML='<div class="photo-ph">♪</div>';
-  if(t.photo){ curPhotoURL=URL.createObjectURL(t.photo); $('zonePhoto').innerHTML=`<img src="${curPhotoURL}">`; }
-  if(curURL) URL.revokeObjectURL(curURL);
-  curURL=URL.createObjectURL(t.audio); audio.src=curURL;
+  if(t.photo instanceof Blob){ curPhotoURL=URL.createObjectURL(t.photo); $('zonePhoto').innerHTML=`<img src="${curPhotoURL}">`; }
+  else if(t.photoUrl){ $('zonePhoto').innerHTML=`<img src="${t.photoUrl}">`; }
+  if(curURL){ URL.revokeObjectURL(curURL); curURL=null; }
+  if(t.audio instanceof Blob){ curURL=URL.createObjectURL(t.audio); audio.src=curURL; }
+  else { audio.src=t.audioUrl||''; }
   renderLines();
   const hook=+t.hook||0; window.__hook=hook;
   audio.addEventListener('loadedmetadata', function once(){
@@ -789,7 +816,7 @@ function renderLib(){
       if(!confirm(`Удалить «${t.title||'без названия'}» из банка?${warn}`)) return;
       removeFromAllRounds(t.id);
       saveSettings();
-      await dbDel(t.id); bank=await dbAll();
+      await apiDeleteTrack(t.id); bank=await apiGetTracks();
       if(editing && editing.id===t.id){ editing=null; ensureEditing(); $('btnNewTrack').click(); }
       renderRoundTabs(); renderLib();
     };
@@ -806,7 +833,7 @@ function renderLib(){
           t.categories=t.categories||[];
           const idx=t.categories.indexOf(c);
           if(idx>=0) t.categories.splice(idx,1); else t.categories.push(c);
-          await dbPut(t);
+          await apiSaveTrackMeta(t);
           renderLib();
         };
         panel.appendChild(chip);
@@ -822,15 +849,20 @@ $('libCatFilter').onchange=renderLib;
 $('libSort').onchange=()=>{ libSortMode=$('libSort').value; renderLib(); };
 $('btnLibUnsynced').onclick=()=>{ libOnlyUnsynced=!libOnlyUnsynced; $('btnLibUnsynced').classList.toggle('on', libOnlyUnsynced); renderLib(); };
 function ensureEditing(){
-  if(!editing) editing={ id:uid(), title:'', artist:'', album:'', hook:0, lyrics:'', lines:[], audio:null, photo:null, categories:['Общая'], createdAt:Date.now() };
+  if(!editing) editing={ id:uid(), title:'', artist:'', album:'', hook:0, lyrics:'', lines:[],
+    audio:null, audioUrl:null, photo:null, photoUrl:null, categories:['Общая'], createdAt:Date.now() };
   return editing;
 }
 // Показывает, что аудио/обложка уже загружены в текущий трек (а не просто
-// "Файл не выбран" — нативный input не умеет сам это отображать).
+// "Файл не выбран" — нативный input не умеет сам это отображать). t.audio/t.photo —
+// свежевыбранный файл, ещё не сохранённый на сервер; t.audioUrl/t.photoUrl —
+// то, что уже лежит на сервере у ранее сохранённого трека.
 function updateFileStatus(){
   const t=editing;
-  $('eAudioStatus').textContent = t&&t.audio ? `✓ ${t.audio.name||'аудио загружено'}` : 'Файл не выбран';
-  $('ePhotoStatus').textContent = t&&t.photo ? '✓ обложка загружена' : 'Файл не выбран';
+  $('eAudioStatus').textContent = t&&t.audio ? `✓ ${t.audio.name||'аудио выбрано (не сохранено)'}`
+    : (t&&t.audioUrl ? '✓ аудио уже сохранено на сервере' : 'Файл не выбран');
+  $('ePhotoStatus').textContent = t&&t.photo ? '✓ обложка выбрана (не сохранена)'
+    : (t&&t.photoUrl ? '✓ обложка уже сохранена' : 'Файл не выбран');
 }
 $('eAudioBtn').onclick=()=>$('eAudio').click();
 $('ePhotoBtn').onclick=()=>$('ePhoto').click();
@@ -879,7 +911,7 @@ function loadEditor(t){
   $('eSpotifyQuery').value=''; $('spotifyResults').style.display='none'; $('spotifyResults').innerHTML='';
   renderEditorCategories(t);
   updateFileStatus();
-  say('eStatus', t.audio ? (t.lines&&t.lines.length?'Трек готов ✓':'Аудио есть, текст не синхронизирован') : 'Загрузите аудиофайл');
+  say('eStatus', (t.audio||t.audioUrl) ? (t.lines&&t.lines.length?'Трек готов ✓':'Аудио есть, текст не синхронизирован') : 'Загрузите аудиофайл');
   renderLib();
 }
 $('eAudio').onchange=async e=>{ const f=e.target.files[0]; if(!f) return;
@@ -979,22 +1011,33 @@ function collectEditor(){
 }
 $('btnSaveTrack').onclick=async()=>{
   const t=collectEditor();
-  if(!t.audio) return say('eStatus','Нужен аудиофайл — выберите его в поле «Аудиофайл»', true);
-  try{ await dbPut(t); bank=await dbAll(); renderLib(); say('eStatus','Сохранено в банк ✓'); }
-  catch(e){ say('eStatus','Ошибка сохранения: '+e.message, true); }
+  if(!t.audio && !t.audioUrl) return say('eStatus','Нужен аудиофайл — выберите его в поле «Аудиофайл»', true);
+  $('btnSaveTrack').disabled=true;
+  try{
+    say('eStatus','<span class="spin"></span>Сохраняю на сервере...');
+    await apiSaveTrackMeta(t);
+    if(t.audio instanceof Blob){ t.audioUrl=await apiUploadAudio(t.id, t.audio); t.audio=null; }
+    if(t.photo instanceof Blob){ t.photoUrl=await apiUploadPhoto(t.id, t.photo); t.photo=null; }
+    bank=await apiGetTracks();
+    editing=bank.find(x=>x.id===t.id)||editing;
+    updateFileStatus();
+    renderLib();
+    say('eStatus','Сохранено в общий банк ✓');
+  }catch(e){ say('eStatus','Ошибка сохранения: '+e.message, true); }
+  finally{ $('btnSaveTrack').disabled=false; }
 };
 $('btnDelTrack').onclick=async()=>{
-  if(!editing||!editing.audio) return;
+  if(!editing || !bank.some(x=>x.id===editing.id)) return;
   const used=roundsContaining(editing.id);
   const warn = used.length ? `\n\nТрек стоит в: ${used.join(', ')} — эти числа освободятся.` : '';
   if(!confirm(`Удалить «${editing.title||'без названия'}» из банка?${warn}`)) return;
   removeFromAllRounds(editing.id);
   saveSettings();
-  await dbDel(editing.id); bank=await dbAll(); editing=null; ensureEditing();
+  await apiDeleteTrack(editing.id); bank=await apiGetTracks(); editing=null; ensureEditing();
   renderRoundTabs(); $('btnNewTrack').click(); say('eStatus','Удалено из банка');
 };
 $('btnPreview').onclick=()=>{ const t=collectEditor();
-  if(!t.audio) return say('eStatus','Нужен аудиофайл', true);
+  if(!t.audio && !t.audioUrl) return say('eStatus','Нужен аудиофайл', true);
   playReturnView='vLib'; openTrack(t,null); };
 
 /* ========== ПОИСК МЕТАДАННЫХ НА SPOTIFY ========== */
@@ -1057,7 +1100,7 @@ $('btnBatch').onclick=()=>{
 $('btnBatchClose').onclick=async()=>{
   if(batchRunning && !confirm('Загрузка ещё идёт — прервать?')) return;
   batchRunning=false; $('batchView').classList.remove('on');
-  bank=await dbAll(); renderLib();
+  bank=await apiGetTracks(); renderLib();
 };
 
 // Разбирает строку списка на исполнителя и название по разделителю "-"/"—".
@@ -1141,11 +1184,11 @@ async function downloadOneTrack(line){
     }catch(e){ /* синхрон не удался — трек всё равно сохранится, досинхронизируете вручную */ }
   }
 
-  await dbPut({
-    id:uid(), title: title||'Без названия', artist, album, hook:0,
-    lyrics, lines, syncPct, audio:audioFile, photo:photoBlob, categories:['Общая'],
-    createdAt: Date.now()
-  });
+  const id=uid();
+  await apiSaveTrackMeta({ id, title: title||'Без названия', artist, album, hook:0,
+    lyrics, lines, syncPct, categories:['Общая'], createdAt: Date.now() });
+  await apiUploadAudio(id, audioFile);
+  if(photoBlob) await apiUploadPhoto(id, photoBlob);
 }
 
 $('btnBatchStart').onclick=async()=>{
@@ -1168,7 +1211,7 @@ $('btnBatchStart').onclick=async()=>{
     $('batchProgress').textContent=`${done+failed+skipped}/${lines.length}`;
     try{
       await downloadOneTrack(lines[i]);
-      bank=await dbAll(); // обновляем банк сразу — чтобы повторы внутри этого же списка тоже ловились как дубли
+      bank=await apiGetTracks(); // обновляем банк сразу — чтобы повторы внутри этого же списка тоже ловились как дубли
       statusEls[i].textContent='✅ готово'; done++;
     }catch(e){
       if(e.duplicate){ statusEls[i].textContent='⏭ '+e.message; skipped++; }
@@ -1181,7 +1224,7 @@ $('btnBatchStart').onclick=async()=>{
   }
 
   batchRunning=false; $('btnBatchStart').disabled=false;
-  bank=await dbAll(); renderLib();
+  bank=await apiGetTracks(); renderLib();
   $('batchProgress').textContent=`Готово: ${done} загружено, ${skipped} уже были в банке, ${failed} с ошибкой из ${lines.length}`;
 };
 
@@ -1216,13 +1259,16 @@ function align(ww, ll, duration){
 }
 async function runAutoSync(){
   const t=collectEditor();
-  if(!t.audio) return say('eStatus','Нужен аудиофайл', true);
+  if(!t.audio && !t.audioUrl) return say('eStatus','Нужен аудиофайл', true);
   if(!t.lyrics.trim()) return say('eStatus','Вставьте текст песни', true);
   say('eStatus','<span class="spin"></span>Распознаю и выравниваю...');
   $('btnAuto').disabled=true;
   try{
-    const fname=t.audio.name||('track.'+((t.audio.type||'audio/mpeg').split('/')[1]||'mp3'));
-    const fd=new FormData(); fd.append('audio',t.audio,fname); fd.append('lyricsHint',t.lyrics.slice(0,800));
+    // Если файл ещё не был загружен на сервер (свежевыбранный) — берём его прямо
+    // из памяти; если трек уже сохранён — забираем байты по его серверному URL.
+    const audioBlob = t.audio instanceof Blob ? t.audio : await (await fetch(t.audioUrl)).blob();
+    const fname=(t.audio&&t.audio.name)||('track.'+((audioBlob.type||'audio/mpeg').split('/')[1]||'mp3'));
+    const fd=new FormData(); fd.append('audio',audioBlob,fname); fd.append('lyricsHint',t.lyrics.slice(0,800));
     const r=await fetch('/api/transcribe',{method:'POST',body:fd}); const d=await r.json();
     if(!r.ok) throw new Error(d.error||'ошибка сервера');
     const res=align(d.words||[], parseLyrics(t.lyrics), d.duration);
@@ -1247,7 +1293,7 @@ async function maybeAutoSync(){
 }
 $('btnManual').onclick=()=>{
   const t=collectEditor();
-  if(!t.audio) return say('eStatus','Нужен аудиофайл', true);
+  if(!t.audio && !t.audioUrl) return say('eStatus','Нужен аудиофайл', true);
   if(!t.lyrics.trim()) return say('eStatus','Вставьте текст песни', true);
   syncLines=parseLyrics(t.lyrics);
   // Если уже есть сохранённая синхронизация того же количества строк —
@@ -1261,8 +1307,9 @@ $('btnManual').onclick=()=>{
   syncMode=true;
   $('sync').classList.add('on'); renderSyncList();
   $('syncPlay').textContent='▶';
-  if(curURL) URL.revokeObjectURL(curURL);
-  curURL=URL.createObjectURL(t.audio); audio.src=curURL;
+  if(curURL){ URL.revokeObjectURL(curURL); curURL=null; }
+  if(t.audio instanceof Blob){ curURL=URL.createObjectURL(t.audio); audio.src=curURL; }
+  else { audio.src=t.audioUrl; }
   audio.addEventListener('loadedmetadata', function once(){
     audio.removeEventListener('loadedmetadata', once);
     $('syncDur').textContent=fmt(audio.duration);
@@ -1474,48 +1521,61 @@ $('btnBlanksOpenSaved').onclick=()=>{
   win.document.open(); win.document.write(renderBlanksDoc(blanks)); win.document.close();
 };
 
-/* ========== СТАРТ + миграция старой структуры (коллекции→категории, раунды) ========== */
-async function migrateToRoundsAndCategories(){
-  let dirty=false;
-  // очень старый формат: трек хранил номер/коллекцию сам в себе
-  bank.forEach(t=>{
-    if(t.collection && t.number){
-      t.categories=t.categories||[];
-      if(!t.categories.includes(t.collection)){ t.categories.push(t.collection); dirty=true; }
-    }
-  });
-  if(!settings.rounds){
-    // старая структура: settings.collections { имя: {номер: trackId} } + played/history по имени коллекции.
-    // Коллекция становится категорией-тегом на треке, а активная коллекция переезжает в Раунд 1,
-    // чтобы не терять уже идущую игру.
-    const oldCollections = settings.collections || {};
-    const catSet = new Set(['Общая']);
-    Object.keys(oldCollections).forEach(name=>{
-      catSet.add(name);
-      Object.values(oldCollections[name]).forEach(trackId=>{
-        const t=bank.find(x=>x.id===trackId);
-        if(t){ t.categories=t.categories||[]; if(!t.categories.includes(name)){ t.categories.push(name); dirty=true; } }
-      });
-    });
-    (settings.categories||[]).forEach(c=>catSet.add(c));
-    settings.categories=[...catSet].sort();
-    const curName = settings.collection || 'Общая';
-    settings.rounds=[
-      { category:curName, size:settings.size||30, map:oldCollections[curName]||{},
-        played:(settings.played||{})[curName]||{}, history:(settings.history||{})[curName]||[], blanks:null },
-      freshRound(), freshRound()
-    ];
-    settings.activeRound=0;
-    delete settings.collections; delete settings.collection; delete settings.played; delete settings.history; delete settings.size;
+/* ========== СТАРТ + разовый перенос локальных данных этого браузера ==========
+   Если в этом браузере раньше (до переезда банка на сервер) уже загружали
+   треки в IndexedDB/localStorage — они сами по себе на сервере не появятся.
+   checkLegacyImport() один раз при старте проверяет: если на сервере банк
+   пустой, а в ЭТОМ браузере есть локальные данные — предлагает перенести их
+   на сервер (аудио/обложки заливаются в S3, метаданные и раунды — в базу). */
+const LEGACY_DBN='karaoke_db', LEGACY_STORE='tracks', LEGACY_SET='karaoke_settings_v2';
+function legacyIdb(){return new Promise((res,rej)=>{const r=indexedDB.open(LEGACY_DBN,1);
+  r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains(LEGACY_STORE))r.result.createObjectStore(LEGACY_STORE,{keyPath:'id'});};
+  r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error);});}
+async function legacyDbAll(){
+  try{
+    const d=await legacyIdb();
+    return await new Promise((res,rej)=>{const q=d.transaction(LEGACY_STORE).objectStore(LEGACY_STORE).getAll();
+      q.onsuccess=()=>res(q.result||[]); q.onerror=()=>rej(q.error);});
+  }catch(e){ return []; }
+}
+async function checkLegacyImport(){
+  if(bank.length) return; // на сервере уже что-то есть — не мешаем и не предлагаем перенос
+  const legacy=await legacyDbAll();
+  if(!legacy.length) return;
+  if(!confirm(`В этом браузере найден локальный банк из ${legacy.length} треков (загруженных раньше, до переезда на общий сервер). Перенести их на сервер сейчас, чтобы они стали видны с любого устройства? Это может занять некоторое время.`)) return;
+  say('lStatus', `<span class="spin"></span>Переношу ${legacy.length} треков на сервер, не закрывайте страницу...`);
+  let done=0;
+  for(const t of legacy){
+    try{
+      await apiSaveTrackMeta(t);
+      if(t.audio) await apiUploadAudio(t.id, t.audio);
+      if(t.photo) await apiUploadPhoto(t.id, t.photo);
+      done++;
+    }catch(e){ console.error('Не удалось перенести трек', t.title, e); }
+    say('lStatus', `<span class="spin"></span>Переношу треки на сервер: ${done}/${legacy.length}`);
   }
-  bank.forEach(t=>{ if(!t.categories||!t.categories.length){ t.categories=['Общая']; dirty=true; } });
-  saveSettings();
-  if(dirty){ for(const t of bank) await dbPut(t); }
+  const legacySettingsRaw=localStorage.getItem(LEGACY_SET);
+  if(legacySettingsRaw){
+    try{
+      const legacySettings=JSON.parse(legacySettingsRaw);
+      if(legacySettings && legacySettings.rounds){ settings=Object.assign({}, settings, legacySettings); saveSettings(); }
+    }catch(e){}
+  }
+  bank=await apiGetTracks();
+  fillLibCatFilter(); renderLib(); renderRoundTabs(); renderGrid();
+  say('lStatus', `Перенесено ${done} из ${legacy.length} треков в общий банк на сервере ✓`);
 }
 (async function init(){
-  try{ bank=await dbAll(); }catch(e){ bank=[]; }
-  await migrateToRoundsAndCategories();
+  try{ bank=await apiGetTracks(); }catch(e){ console.error(e); bank=[]; }
+  try{
+    const loaded=await apiGetSettings();
+    if(loaded && loaded.rounds) settings=loaded;
+    else saveSettings(); // на сервере ещё ничего нет — сохраняем дефолт, чтобы он там появился
+  }catch(e){ console.error(e); }
+  bank.forEach(t=>{ if(!t.categories||!t.categories.length) t.categories=['Общая']; });
+  if(!settings.categories||!settings.categories.length) settings.categories=['Общая'];
   syncRoundControls(); renderRoundTabs(); renderGrid();
+  checkLegacyImport();
 })();
 </script>
 </body>
