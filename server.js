@@ -568,15 +568,41 @@ app.get('/api/cover-proxy', async (req, res) => {
   }
 });
 
+// Вырезает содержимое каждого <div data-lyrics-container="true">...</div>,
+// ПРАВИЛЬНО считая вложенные <div> (внутри лежат ещё вложенные div'ы —
+// например, вокруг ссылок на исполнителей в строке или переносов), а не
+// наивным нежадным regex'ом до первого попавшегося </div>: он обрывался на
+// самом первом вложенном закрывающем тэге и вместо текста песни возвращал
+// обрывок вроде "11 ContributorsTranslationsRomanization" — служебный
+// заголовок страницы, а не сам текст. Отсюда и жалобы на "неполный текст".
+function extractGeniusContainers(html) {
+  const containers = [];
+  const openRe = /<div[^>]*\sdata-lyrics-container="true"[^>]*>/g;
+  let openMatch;
+  while ((openMatch = openRe.exec(html))) {
+    const start = openMatch.index + openMatch[0].length;
+    const tagRe = /<div\b[^>]*>|<\/div>/g;
+    tagRe.lastIndex = start;
+    let depth = 1, end = html.length, tagMatch;
+    while ((tagMatch = tagRe.exec(html))) {
+      if (tagMatch[0].startsWith('</')) depth--; else depth++;
+      if (depth === 0) { end = tagMatch.index; break; }
+    }
+    containers.push(html.slice(start, end));
+    openRe.lastIndex = end;
+  }
+  return containers;
+}
+
 // Разбор HTML-страницы Genius (структура одинаковая что при заходе через
 // официальный API, что при обычной ссылке из веб-поиска) — самый надёжный
 // источник текста из всех, что у нас есть, потому что верстка Genius строго
 // размечает именно блок с текстом (data-lyrics-container), а не угадывает
 // эвристикой, как для произвольных сайтов.
 function parseGeniusHtml(html) {
-  const blocks = [...html.matchAll(/<div[^>]*data-lyrics-container="true"[^>]*>([\s\S]*?)<\/div>\s*(?:<div|<\/div>)/g)];
+  const blocks = extractGeniusContainers(html);
   if (!blocks.length) return null;
-  const text = blocks.map(b => b[1])
+  const text = blocks
     .join('\n')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<a[^>]*>|<\/a>/gi, '')
@@ -584,7 +610,10 @@ function parseGeniusHtml(html) {
     .replace(/\[[^\]]*\]/g, '') // убираем пометки вида [Verse 1], [Chorus]
     .replace(/&amp;/g, '&').replace(/&#x27;/g, "'").replace(/&quot;/g, '"')
     .split('\n').map(s => s.trim()).filter(Boolean).join('\n');
-  return text || null;
+  // Если вышло подозрительно коротко (пара строк служебного текста, а не
+  // куплет) — считаем, что разбор не удался, а не отдаём огрызок.
+  if (!text || text.split('\n').length < 4) return null;
+  return text;
 }
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 
