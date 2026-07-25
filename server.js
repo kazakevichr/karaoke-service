@@ -8,6 +8,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const fsp = require('fs/promises');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 const Database = require('better-sqlite3');
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
@@ -27,6 +28,60 @@ const uploadTrackFile = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 }
 });
+
+/* ==========================================================================
+   Авторизация банка треков — один общий пароль (ADMIN_PASSWORD), без отдельных
+   логинов на пользователя. Страница игры и настройка раунда остаются полностью
+   открытыми; закрыт только сам банк (страница /bank и API его редактирования:
+   создание/удаление трека, загрузка аудио/фото, поиск на Spotify/YouTube,
+   поиск текста, авто/ручной синхрон). Чтение списка треков (GET /api/tracks)
+   и раунды (/api/settings) остаются публичными — иначе страница игры не
+   смогла бы ни проигрывать треки, ни сохранять отметки сыгранного.
+   Сессия — простой случайный токен в httpOnly-cookie, список валидных токенов
+   держим в памяти процесса (без БД/JWT — этого достаточно для одного общего
+   пароля). При перезапуске сервера все уже вошедшие разлогиниваются — это
+   нормально, не проблема для такого масштаба использования.
+   ========================================================================== */
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+const SESSION_COOKIE = 'bank_session';
+const validSessions = new Set();
+
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  const out = {};
+  if (!header) return out;
+  header.split(';').forEach(part => {
+    const idx = part.indexOf('=');
+    if (idx < 0) return;
+    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  });
+  return out;
+}
+function requireAuth(req, res, next) {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (token && validSessions.has(token)) return next();
+  res.status(401).json({ error: 'Нужен вход в банк треков' });
+}
+
+app.post('/api/login', (req, res) => {
+  if (!ADMIN_PASSWORD) return res.status(500).json({ error: 'ADMIN_PASSWORD не задан на сервере — вход в банк не настроен' });
+  const password = (req.body || {}).password || '';
+  if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Неверный пароль' });
+  const token = crypto.randomBytes(24).toString('hex');
+  validSessions.add(token);
+  res.cookie(SESSION_COOKIE, token, {
+    httpOnly: true, sameSite: 'lax', maxAge: 30 * 24 * 3600 * 1000,
+    secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
+  });
+  res.json({ ok: true });
+});
+app.post('/api/logout', (req, res) => {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (token) validSessions.delete(token);
+  res.clearCookie(SESSION_COOKIE);
+  res.json({ ok: true });
+});
+app.get('/api/auth-check', requireAuth, (req, res) => res.json({ ok: true }));
 
 /* ==========================================================================
    Общий банк треков и раунды — теперь на сервере, а не в IndexedDB/localStorage
@@ -120,7 +175,7 @@ app.get('/api/tracks', (req, res) => {
   res.json(rows.map(rowToTrack));
 });
 
-app.put('/api/tracks/:id', (req, res) => {
+app.put('/api/tracks/:id', requireAuth, (req, res) => {
   try {
     const id = req.params.id;
     const b = req.body || {};
@@ -145,7 +200,7 @@ app.put('/api/tracks/:id', (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/tracks/:id/audio', (req, res) => {
+app.post('/api/tracks/:id/audio', requireAuth, (req, res) => {
   uploadTrackFile.single('audio')(req, res, async (uploadErr) => {
     if (uploadErr) {
       const code = uploadErr.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
@@ -167,7 +222,7 @@ app.post('/api/tracks/:id/audio', (req, res) => {
   });
 });
 
-app.post('/api/tracks/:id/photo', (req, res) => {
+app.post('/api/tracks/:id/photo', requireAuth, (req, res) => {
   uploadTrackFile.single('photo')(req, res, async (uploadErr) => {
     if (uploadErr) return res.status(400).json({ error: 'Ошибка загрузки файла: ' + uploadErr.message });
     try {
@@ -191,7 +246,7 @@ app.post('/api/tracks/:id/photo', (req, res) => {
 // из браузера напрямую на S3 упирается в отсутствие CORS-заголовков у
 // бакета, поэтому байты забираем здесь, на сервере (CORS — чисто браузерное
 // ограничение, серверных запросов оно не касается).
-app.get('/api/tracks/:id/audio-file', async (req, res) => {
+app.get('/api/tracks/:id/audio-file', requireAuth, async (req, res) => {
   try {
     if (!s3Enabled) return res.status(500).json({ error: 'S3 не настроен на сервере' });
     const row = db.prepare('SELECT audioKey, audioType FROM tracks WHERE id = ?').get(req.params.id);
@@ -202,7 +257,7 @@ app.get('/api/tracks/:id/audio-file', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.delete('/api/tracks/:id', async (req, res) => {
+app.delete('/api/tracks/:id', requireAuth, async (req, res) => {
   try {
     const id = req.params.id;
     const existing = db.prepare('SELECT * FROM tracks WHERE id = ?').get(id);
@@ -448,7 +503,7 @@ app.get('/api/saved-games/:id/download', async (req, res) => {
   }
 });
 
-app.post('/api/transcribe', (req, res) => {
+app.post('/api/transcribe', requireAuth, (req, res) => {
   upload.single('audio')(req, res, async (uploadErr) => {
     if (uploadErr) {
       // Ошибки multer (например, превышен лимит размера) не должны улетать
@@ -575,7 +630,7 @@ function runYandexScript(mode, query) {
 
 // Поиск трека: возвращает варианты с названием, исполнителем, альбомом и обложкой.
 // Сначала Spotify, при неудаче — Яндекс.Музыка как запасной источник.
-app.get('/api/search-track', async (req, res) => {
+app.get('/api/search-track', requireAuth, async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
 
@@ -615,7 +670,7 @@ app.get('/api/search-track', async (req, res) => {
 
 // Прокси для обложки: скачиваем на сервере, чтобы не упираться в CORS в браузере.
 // Разрешены обложки Spotify и Яндекс.Музыки.
-app.get('/api/cover-proxy', async (req, res) => {
+app.get('/api/cover-proxy', requireAuth, async (req, res) => {
   try {
     const url = req.query.url || '';
     if (!/^https:\/\/(i\.scdn\.co|avatars\.yandex\.net)\//.test(url)) {
@@ -841,7 +896,7 @@ async function trySearchWeb(artist, title) {
 // случае — веб-поиск (включая точный разбор Genius-страниц, если найдутся) и,
 // напоследок, Genius по официальному API (если когда-нибудь будет токен).
 // Если ни один источник не нашёл — фронт оставит поле пустым, текст впишется вручную.
-app.get('/api/lyrics', async (req, res) => {
+app.get('/api/lyrics', requireAuth, async (req, res) => {
   const artist = (req.query.artist || '').trim();
   const title = (req.query.title || '').trim();
   if (!artist || !title) return res.status(400).json({ error: 'Нужны artist и title' });
@@ -903,7 +958,7 @@ app.get('/api/lyrics', async (req, res) => {
 // длительность, превью — чтобы можно было выбрать нужную версию вручную,
 // а не слепо качать первый результат (который может оказаться кавером
 // или записью с концерта).
-app.get('/api/search-youtube', async (req, res) => {
+app.get('/api/search-youtube', requireAuth, async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
 
@@ -994,7 +1049,7 @@ function spawnYtDlpTracked(args) {
   return { proc, promise };
 }
 
-app.get('/api/fetch-audio', async (req, res) => {
+app.get('/api/fetch-audio', requireAuth, async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
 
@@ -1103,6 +1158,14 @@ app.get('/api/fetch-audio', async (req, res) => {
     console.error(e);
   }
 });
+
+// Три отдельных страницы вместо одного index.html: игра / настройка раунда /
+// банк треков (за паролём). Явные маршруты нужны, чтобы работали чистые URL
+// без .html — сами страницы ссылаются друг на друга именно так (location.href
+// = '/', '/setup', '/bank').
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'game.html')));
+app.get('/setup', (req, res) => res.sendFile(path.join(__dirname, 'public', 'setup.html')));
+app.get('/bank', (req, res) => res.sendFile(path.join(__dirname, 'public', 'bank.html')));
 
 app.use(express.static(path.join(__dirname, 'public')));
 
