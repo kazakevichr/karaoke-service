@@ -876,7 +876,7 @@ $('libSort').onchange=()=>{ libSortMode=$('libSort').value; renderLib(); };
 $('btnLibUnsynced').onclick=()=>{ libOnlyUnsynced=!libOnlyUnsynced; $('btnLibUnsynced').classList.toggle('on', libOnlyUnsynced); renderLib(); };
 function ensureEditing(){
   if(!editing) editing={ id:uid(), title:'', artist:'', album:'', hook:0, lyrics:'', lines:[],
-    audio:null, audioUrl:null, photo:null, photoUrl:null, categories:['Общая'], createdAt:Date.now() };
+    audio:null, audioUrl:null, photo:null, photoUrl:null, categories:[], createdAt:Date.now() };
   return editing;
 }
 // Показывает, что аудио/обложка уже загружены в текущий трек (а не просто
@@ -1212,7 +1212,7 @@ async function downloadOneTrack(line){
 
   const id=uid();
   await apiSaveTrackMeta({ id, title: title||'Без названия', artist, album, hook:0,
-    lyrics, lines, syncPct, categories:['Общая'], createdAt: Date.now() });
+    lyrics, lines, syncPct, categories:[], createdAt: Date.now() });
   await apiUploadAudio(id, audioFile);
   if(photoBlob) await apiUploadPhoto(id, photoBlob);
 }

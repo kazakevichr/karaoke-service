@@ -110,7 +110,12 @@
   .full { width:100%; }
 
   /* ---------- Начальный экран ---------- */
-  #vIntro { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px; text-align:center; padding:5vh 5vw; }
+  /* display НЕ задаём здесь — это делает .view/.view.on (см. выше). ID-селектор
+     сильнее по специфичности, чем .view, и раньше здесь стояло "display:flex"
+     без привязки к классу .on — из-за этого #vIntro оставался видимым поверх
+     сетки ПОСТОЯННО, даже после переключения на #vGrid, и кнопка "Начать игру"
+     внешне выглядела нерабочей (хотя переключение состояния внутри срабатывало). */
+  #vIntro.on { flex-direction:column; align-items:center; justify-content:center; gap:18px; text-align:center; padding:5vh 5vw; }
   #vIntro h1 { font-size:34px; margin:0; }
   #vIntro p { color:var(--past); font-size:16px; max-width:560px; margin:0; }
 </style>
