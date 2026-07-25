@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Музыкальное лото — настройка раунда</title>
+<style>
+  :root { --bg:#0d0b1a; --bg2:#171332; --accent:#ff2e63; --accent2:#3b82f6;
+          --dim:#4a4868; --past:#8a87b8; --card:#1e1a3d; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; overflow:hidden;
+    background:radial-gradient(ellipse at 50% 0%, var(--bg2) 0%, var(--bg) 70%);
+    font-family:'Segoe UI',Arial,sans-serif; color:#fff; }
+  body { display:flex; flex-direction:column; height:100vh; }
+
+  .top { padding:12px 20px; background:rgba(0,0,0,.35); border-bottom:1px solid rgba(255,255,255,.08);
+         display:flex; gap:10px; align-items:center; flex-wrap:wrap; flex-shrink:0; }
+  .top .sp { flex:1; }
+  label.f { font-size:11px; color:var(--past); text-transform:uppercase; letter-spacing:.06em; display:block; margin-bottom:4px; }
+  .fld { display:flex; flex-direction:column; }
+  input,textarea,select { background:var(--card); border:1px solid rgba(255,255,255,.15); color:#fff;
+    padding:8px 11px; border-radius:8px; font-size:14px; font-family:inherit; }
+  select{ cursor:pointer; }
+  button { background:linear-gradient(135deg,var(--accent),#ff5f8f); border:0; color:#fff;
+           padding:10px 16px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
+  button.sec { background:rgba(255,255,255,.1); }
+  button.gh { background:transparent; border:1px solid rgba(255,255,255,.2); }
+  button.on { background:linear-gradient(135deg,var(--accent2),#60a5fa); }
+  .status { font-size:13px; color:var(--past); }
+  .status.err { color:var(--accent); }
+
+  /* ---------- Сетка (упрощённая — только для расстановки, без игры) ---------- */
+  #gridWrap { flex:1; min-height:0; display:grid; gap:1.1vh 1.1vw; padding:2.2vh 1.8vw; }
+  .num { position:relative; display:flex; flex-direction:column; align-items:center; justify-content:center;
+         border-radius:14px; background:linear-gradient(150deg, rgba(255,255,255,.07), rgba(255,255,255,.02));
+         border:1px solid rgba(255,255,255,.09); font-weight:800; cursor:default;
+         transition:transform .15s, background .2s, color .2s; color:#fff; min-height:0; overflow:hidden; }
+  .num.empty { color:var(--dim); background:rgba(255,255,255,.02); border-style:dashed; }
+  body.assign .num { cursor:pointer; }
+  body.assign .num:hover { transform:translateY(-3px); background:linear-gradient(150deg, rgba(59,130,246,.35), rgba(59,130,246,.1)); }
+  .num .cap { font-size:1.5vh; font-weight:600; color:#fff; margin-top:.6vh;
+              padding:0 .5vw; text-align:center; line-height:1.25; max-height:4vh; overflow:hidden; display:none; }
+  body.assign .num .cap { display:block; }
+
+  /* ---------- Модалка выбора трека на число ---------- */
+  .modal { position:fixed; inset:0; background:rgba(8,6,20,.9); z-index:60; display:none;
+           align-items:center; justify-content:center; padding:5vh 5vw; }
+  .modal.on { display:flex; }
+  .mbox { background:#141030; border:1px solid rgba(255,255,255,.12); border-radius:16px;
+          width:100%; max-width:720px; max-height:100%; display:flex; flex-direction:column; padding:20px; }
+  .mbox h3 { margin:0 0 12px; }
+  .mlist { flex:1; overflow-y:auto; margin:12px 0; }
+  .mrow { padding:11px 13px; border-radius:9px; cursor:pointer; display:flex; gap:12px; align-items:center;
+          background:rgba(255,255,255,.03); margin-bottom:6px; }
+  .mrow:hover { background:rgba(255,46,99,.22); }
+  .mrow .tt small { color:var(--past); display:block; font-size:12px; }
+  .mrow .ic { width:30px; text-align:center; flex-shrink:0; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:0; align-items:flex-end; }
+</style>
+</head>
+<body>
+
+<div class="top">
+  <div class="fld"><label class="f">Раунды</label><div id="roundTabs" style="display:flex;gap:6px"></div></div>
+  <div class="fld"><label class="f">Категория раунда</label><select id="rCategory" style="width:180px"></select></div>
+  <div class="fld"><label class="f">Чисел</label>
+    <select id="rSize"><option>20</option><option>30</option><option>40</option><option>50</option><option selected>60</option></select>
+  </div>
+  <button class="sec" id="btnStartRound">Разыграть раунд</button>
+  <button class="sec" id="btnAssign">Расставить треки</button>
+  <div class="sp"></div>
+  <span class="status" id="sStatus"></span>
+  <button class="sec" id="btnToBank">Банк треков</button>
+  <button class="gh" id="btnToGame">← К игре</button>
+</div>
+<div id="gridWrap"></div>
+
+<!-- ============ ВЫБОР ТРЕКА НА ЧИСЛО ============ -->
+<div class="modal" id="picker">
+  <div class="mbox">
+    <h3 id="pickTitle">Трек на число</h3>
+    <input type="text" id="pickSearch" placeholder="Поиск по названию или исполнителю">
+    <div class="mlist" id="pickList"></div>
+    <div class="row" style="margin:0">
+      <button class="gh" id="pickClear">Убрать трек с числа</button>
+      <div class="sp"></div>
+      <button class="sec" id="pickClose">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<script src="/shared.js"></script>
+<script>
+let bank = [];
+let settings = { categories:['Общая'], activeRound:0, rounds:[freshRound(),freshRound(),freshRound()] };
+let assignMode = false, pickNumber = null;
+function say(el,t,err){ const e=$(el); e.innerHTML=t; e.className='status'+(err?' err':''); }
+function activeRound(){ return settings.rounds[settings.activeRound]; }
+function removeFromAllRounds(trackId){
+  settings.rounds.forEach(r=>{ Object.keys(r.map||{}).forEach(n=>{ if(r.map[n]===trackId) delete r.map[n]; }); });
+}
+function fillCategorySelect(el, withNew){
+  const cur=el.value;
+  el.innerHTML='';
+  settings.categories.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; el.appendChild(o); });
+  if(withNew){ const extra=document.createElement('option'); extra.value='__new'; extra.textContent='+ Новая категория...'; el.appendChild(extra); }
+  if(cur && [...el.options].some(o=>o.value===cur)) el.value=cur;
+}
+function renderRoundTabs(){
+  const box=$('roundTabs'); box.innerHTML='';
+  settings.rounds.forEach((r,i)=>{
+    const cnt=Object.values(r.map||{}).filter(Boolean).length;
+    const b=document.createElement('button'); b.type='button';
+    b.className='sec'+(i===settings.activeRound?' on':'');
+    b.style.cssText='display:flex;flex-direction:column;align-items:center;line-height:1.3;padding:8px 14px';
+    b.innerHTML=`<span>Раунд ${i+1}</span><span style="font-size:11px;opacity:.75">${r.category?r.category+' · '+cnt:'не задан'}</span>`;
+    b.onclick=()=>{ settings.activeRound=i; apiSaveSettings(settings); syncRoundControls(); renderRoundTabs(); renderGrid(); };
+    box.appendChild(b);
+  });
+}
+function syncRoundControls(){
+  const r=activeRound();
+  fillCategorySelect($('rCategory'), true);
+  if(r.category) $('rCategory').value=r.category;
+  $('rSize').value=r.size||30;
+}
+function renderGrid(){
+  const r=activeRound();
+  const size=+r.size||30;
+  const cols = size<=20?5 : size<=30?6 : size<=40?8 : 10;
+  const wrap=$('gridWrap');
+  wrap.style.gridTemplateColumns=`repeat(${cols},1fr)`;
+  wrap.style.gridTemplateRows=`repeat(${Math.ceil(size/cols)},1fr)`;
+  wrap.innerHTML='';
+  const map=r.map||{};
+  for(let i=1;i<=size;i++){
+    const tid=map[i], t=tid?trackById(bank,tid):null;
+    const d=document.createElement('div');
+    d.className='num'+(t?'':' empty');
+    const fs = size<=20?'6.4vh' : size<=30?'5.4vh' : size<=40?'4.6vh':'3.9vh';
+    d.innerHTML=`<div class="d" style="font-size:${fs}"><span>${i}</span></div>`+
+                `<div class="cap">${t?escapeHtml(t.title||'без названия'):'—'}</div>`;
+    d.onclick=()=>{ if(assignMode) openPicker(i); };
+    wrap.appendChild(d);
+  }
+  const cnt=Object.values(map).filter(Boolean).length;
+  say('sStatus', `Раунд ${settings.activeRound+1}${r.category?' · '+r.category:''}: ${cnt} из ${size} расставлено`);
+}
+$('rCategory').onchange=()=>{
+  if($('rCategory').value==='__new'){
+    const n=prompt('Название новой категории (например: 90-е, Саундтреки)');
+    if(n && !settings.categories.includes(n)){ settings.categories.push(n); settings.categories.sort(); apiSaveSettings(settings); }
+    fillCategorySelect($('rCategory'), true);
+    $('rCategory').value = n || activeRound().category || settings.categories[0];
+  }
+};
+$('rSize').onchange=()=>{
+  const r=activeRound();
+  r.size=+$('rSize').value;
+  apiSaveSettings(settings); renderRoundTabs(); renderGrid();
+};
+$('btnStartRound').onclick=()=>{
+  const cat=$('rCategory').value, size=+$('rSize').value;
+  if(!cat||cat==='__new') return say('sStatus','Выберите категорию раунда', true);
+  const pool=tracksInCategory(bank,cat);
+  if(!pool.length) return say('sStatus', `В категории «${cat}» нет треков — сначала добавьте их в банке`, true);
+  const r=activeRound();
+  const hasProgress = Object.keys(r.played||{}).length>0 || Object.keys(r.map||{}).length>0;
+  if(hasProgress && !confirm(`Раунд ${settings.activeRound+1} будет пересоздан заново — текущая расстановка и отметки сыгранного сотрутся. Продолжить?`)) return;
+  const n=Math.min(size, pool.length);
+  const usedElsewhere = new Set();
+  settings.rounds.forEach((rr,ri)=>{ if(ri!==settings.activeRound) Object.values(rr.map||{}).forEach(id=>{ if(id) usedElsewhere.add(id); }); });
+  const fresh = pool.filter(t=>!usedElsewhere.has(t.id));
+  const rest = pool.filter(t=>usedElsewhere.has(t.id));
+  const shuffled=[...shuffleArr(fresh), ...shuffleArr(rest)].slice(0,n);
+  const overlapCount=Math.max(0, n-fresh.length);
+  const map={}; shuffled.forEach((t,idx)=>{ map[idx+1]=t.id; });
+  r.category=cat; r.size=n; r.map=map; r.played={}; r.history=[]; r.blanks=null;
+  apiSaveSettings(settings); renderRoundTabs(); renderGrid();
+  say('sStatus', n<size
+    ? `Раунд ${settings.activeRound+1}: в категории «${cat}» нашлось только ${n} треков — раунд сокращён`
+    : overlapCount>0
+      ? `Раунд ${settings.activeRound+1}: ${n} треков расставлено, но в категории «${cat}» не хватает уникальных — ${overlapCount} совпадают с другими раундами`
+      : `Раунд ${settings.activeRound+1}: ${n} треков из категории «${cat}» расставлено случайно`);
+};
+$('btnAssign').onclick = () => {
+  assignMode=!assignMode;
+  document.body.classList.toggle('assign', assignMode);
+  $('btnAssign').classList.toggle('on', assignMode);
+  $('btnAssign').textContent = assignMode?'Готово':'Расставить треки';
+  say('sStatus', assignMode?'Нажмите на число, чтобы назначить трек':'');
+  renderGrid();
+};
+$('btnToBank').onclick = () => { location.href='/bank'; };
+$('btnToGame').onclick = () => { location.href='/'; };
+
+/* ========== ВЫБОР ТРЕКА НА ЧИСЛО ========== */
+function openPicker(n){
+  pickNumber=n;
+  $('pickTitle').textContent=`Какой трек ставим на число ${n}?`;
+  $('pickSearch').value=''; renderPick(); $('picker').classList.add('on'); $('pickSearch').focus();
+}
+function renderPick(){
+  const q=$('pickSearch').value.toLowerCase().trim();
+  const box=$('pickList'); box.innerHTML='';
+  const list=bank.filter(t=>!q || (t.title||'').toLowerCase().includes(q) || (t.artist||'').toLowerCase().includes(q));
+  if(!list.length) box.innerHTML='<div style="color:#4a4868;padding:12px">В банке нет подходящих треков. Добавьте их в разделе «Банк треков».</div>';
+  list.forEach(t=>{
+    const where=roundsContaining(settings.rounds, t.id);
+    const d=document.createElement('div'); d.className='mrow';
+    d.innerHTML=`<div class="ic">${t.lines&&t.lines.length?'✓':'♪'}</div>
+      <div class="tt">${escapeHtml(t.title||'Без названия')}<small>${escapeHtml(t.artist||'')}${where.length?' • уже в: '+where.join(', '):''}</small></div>`;
+    d.onclick=()=>{ activeRound().map[pickNumber]=t.id; apiSaveSettings(settings); $('picker').classList.remove('on'); renderGrid(); renderRoundTabs(); };
+    box.appendChild(d);
+  });
+}
+$('pickSearch').oninput=renderPick;
+$('pickClear').onclick=()=>{ delete activeRound().map[pickNumber]; apiSaveSettings(settings); $('picker').classList.remove('on'); renderGrid(); renderRoundTabs(); };
+$('pickClose').onclick=()=>$('picker').classList.remove('on');
+
+(async function init(){
+  try{ bank=await apiGetTracks(); }catch(e){ console.error(e); bank=[]; }
+  try{
+    const loaded=await apiGetSettings();
+    if(loaded && loaded.rounds) settings=loaded;
+  }catch(e){ console.error(e); }
+  if(!settings.categories||!settings.categories.length) settings.categories=['Общая'];
+  syncRoundControls(); renderRoundTabs(); renderGrid();
+})();
+</script>
+</body>
+</html>
