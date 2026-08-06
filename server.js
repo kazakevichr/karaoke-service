@@ -13,6 +13,8 @@ const { spawn } = require('child_process');
 const Database = require('better-sqlite3');
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const archiver = require('archiver');
+const { buildTrackListText } = require('./lib/tracklist');
+const { streamBlanksPdf, MAX_PLAYERS } = require('./lib/blanks-pdf');
 
 const app = express();
 app.use(cors());
@@ -339,9 +341,14 @@ app.get('/api/saved-games', (req, res) => {
     const rows = db.prepare('SELECT id, name, createdAt, data FROM saved_games ORDER BY createdAt DESC').all();
     res.json(rows.map(r => {
       const data = JSON.parse(r.data);
-      const roundsCount = (data.rounds || []).filter(rr => Object.keys(rr.map || {}).length).length;
+      const nonEmpty = (data.rounds || []).filter(rr => Object.keys(rr.map || {}).length);
+      const roundsCount = nonEmpty.length;
       const trackCount = Object.keys(data.tracks || {}).length;
-      return { id: r.id, name: r.name, createdAt: r.createdAt, roundsCount, trackCount };
+      // Сколько треков расставлено в каждом блоке. Нужно генератору бланков:
+      // клеток на бланке всегда 25, и если в блоке треков меньше, часть клеток
+      // останется пустой — про это стоит предупредить ДО печати тиража.
+      const roundSizes = nonEmpty.map(rr => new Set(Object.values(rr.map || {}).filter(Boolean)).size);
+      return { id: r.id, name: r.name, createdAt: r.createdAt, roundsCount, trackCount, roundSizes };
     }));
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
@@ -354,6 +361,81 @@ app.delete('/api/saved-games/:id', (req, res) => {
     fs.unlink(path.join(ZIP_CACHE_DIR, `${req.params.id}.zip`), () => {});
     res.json({ ok: true });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// Имя файла для скачивания. Кириллицу в Content-Disposition кладём через
+// filename* (RFC 5987) — простой filename="" её не переживает. Но filename=""
+// всё равно обязателен как запасной вариант, и подставлять туда русское имя,
+// побитое в «_________ 90-_», незачем: транслитерируем, чтобы даже в запасном
+// варианте читалось «Vecherinka 90-h — blanki».
+const TRANSLIT = {
+  а:'a',б:'b',в:'v',г:'g',д:'d',е:'e',ё:'e',ж:'zh',з:'z',и:'i',й:'y',к:'k',л:'l',м:'m',
+  н:'n',о:'o',п:'p',р:'r',с:'s',т:'t',у:'u',ф:'f',х:'h',ц:'c',ч:'ch',ш:'sh',щ:'sch',
+  ъ:'',ы:'y',ь:'',э:'e',ю:'yu',я:'ya',
+};
+function translit(s) {
+  return [...s].map(ch => {
+    const low = ch.toLowerCase();
+    if (!(low in TRANSLIT)) return ch;
+    const t = TRANSLIT[low];
+    return ch === low ? t : t.charAt(0).toUpperCase() + t.slice(1);
+  }).join('');
+}
+function contentDisposition(name, ext) {
+  const safe = (name || 'game').replace(/[^a-zA-Zа-яА-ЯёЁ0-9 _-]/g, ' ').replace(/\s+/g, ' ').trim() || 'game';
+  const ascii = translit(safe).replace(/[^\x20-\x7E]/g, '_') || 'game';
+  return `attachment; filename="${ascii}.${ext}"; filename*=UTF-8''${encodeURIComponent(safe)}.${ext}`;
+}
+
+/* Текстовый состав сохранённой игры: блок, номер, название, исполнитель +
+   секция с проверкой на повторы. Нужен, чтобы перед печатью бланков глазами
+   или через ИИ убедиться, что один и тот же трек не попал в два блока —
+   правило музлото: за игру трек звучит ровно один раз. Логика сборки текста
+   лежит в lib/tracklist.js. */
+app.get('/api/saved-games/:id/tracklist', (req, res) => {
+  try {
+    const row = db.prepare('SELECT * FROM saved_games WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Игра не найдена' });
+    const text = buildTrackListText(row);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    // inline вместо attachment — если открыть ссылку в новой вкладке, список
+    // сразу видно в браузере; кнопка «скачать» на клиенте всё равно сохраняет
+    // файл через Blob, так что оба сценария закрыты.
+    if (req.query.download === '1') res.setHeader('Content-Disposition', contentDisposition(`${row.name} — треки`, 'txt'));
+    // BOM — иначе Блокнот Windows открывает UTF-8 без него кракозябрами.
+    res.send('﻿' + text);
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+/* PDF с бланками участников по сохранённой игре. Всё, что нужно указать, —
+   количество участников: раскладка блоков уже зафиксирована в снимке игры,
+   поэтому бланки собираются сами и гарантированно совпадают с тем, что
+   реально прозвучит. На каждого участника — по бланку на каждый блок
+   (обычно три листа за игру). Страницы идут по блокам: сначала весь первый
+   блок, потом второй, потом третий. Отрисовка — в lib/blanks-pdf.js. */
+app.get('/api/saved-games/:id/blanks.pdf', async (req, res) => {
+  try {
+    const row = db.prepare('SELECT * FROM saved_games WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Игра не найдена' });
+
+    const players = Math.max(1, Math.min(MAX_PLAYERS, parseInt(req.query.players, 10) || 1));
+    const design = {
+      title: (req.query.title || '').trim() || 'МУЗЫКАЛЬНОЕ ЛОТО',
+      nomination: (req.query.nomination || '').trim(),
+      tagline: (req.query.tagline || '').trim(),
+      qrUrl: (req.query.qrUrl || '').trim(),
+    };
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition(`${row.name} — бланки ${players} уч`, 'pdf'));
+    await streamBlanksPdf(res, row, players, design);
+  } catch (e) {
+    console.error('[blanks.pdf]', e);
+    // Заголовки могли уже уйти вместе с началом PDF — тогда честно рвём
+    // соединение, иначе браузер сохранит битый файл, считая его целым.
+    if (!res.headersSent) res.status(500).json({ error: e.message });
+    else res.destroy();
+  }
 });
 
 // Собирает ZIP с оффлайн-версией конкретной сохранённой игры: HTML-плеер без

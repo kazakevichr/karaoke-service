@@ -166,29 +166,45 @@
 <!-- ============ БЛАНКИ ДЛЯ УЧАСТНИКОВ ============ -->
 <div class="sync" id="blanksView">
   <h3>Бланки для участников</h3>
-  <p>Как в лото: каждому игроку — свой уникальный бланк из треков, которые
-     реально расставлены в текущем раунде (не из всей категории). Открывается
-     отдельная страница для печати — по одному бланку на лист.</p>
-  <div class="row" style="margin:0 0 6px">
-    <span class="status" id="blanksPoolInfo"></span>
+  <p>Бланки собираются автоматически из <b>сохранённой игры</b>: раскладка блоков
+     в ней уже зафиксирована, поэтому напечатанное гарантированно совпадёт с тем,
+     что реально прозвучит. Укажите только количество участников — каждый получит
+     по бланку на каждый блок (обычно три листа за игру), треки на бланках
+     перемешаны в случайном порядке. На выходе — готовый PDF, страницы идут
+     по блокам: сначала весь первый, потом второй, потом третий.</p>
+  <div class="row">
+    <div class="fld full"><label class="f">Сохранённая игра</label>
+      <select id="bnGame" class="full"></select></div>
   </div>
   <div class="row">
-    <div class="fld"><label class="f">Игроков (бланков)</label><input type="number" id="bnCount" min="1" max="200" value="20" style="width:100px"></div>
-    <div class="fld"><label class="f">Заголовок</label><input type="text" id="bnTitle" style="width:280px"></div>
+    <div class="fld"><label class="f">Участников</label>
+      <input type="number" id="bnCount" min="1" max="300" value="20" style="width:110px"></div>
+    <div class="fld" style="flex:1"><label class="f">&nbsp;</label>
+      <span class="status" id="blanksPoolInfo"></span></div>
   </div>
-  <div class="row">
-    <div class="fld full"><label class="f">Текст раунда</label><input type="text" id="bnRoundLabel" class="full"></div>
-  </div>
-  <div class="row">
-    <div class="fld"><label class="f">Номинация (необязательно)</label><input type="text" id="bnNomination" style="width:340px" placeholder="например: Самый активный и весёлый столик"></div>
-    <div class="fld"><label class="f">Подпись</label><input type="text" id="bnTagline" style="width:220px"></div>
-  </div>
-  <div class="row">
-    <div class="fld full"><label class="f">Ссылка для QR-кода (необязательно — соцсеть, Telegram и т.д.)</label><input type="text" id="bnQrUrl" class="full" placeholder="https://..."></div>
-  </div>
+
+  <!-- Оформление вынесено под спойлер: в 99% случаев его трогать не нужно,
+       значения запоминаются между запусками и подставляются сами. -->
+  <details id="bnDesign" style="margin:10px 0 4px">
+    <summary style="cursor:pointer;color:#8a87b8;font-size:13px;user-select:none">Оформление бланка (заголовок, номинация, QR)</summary>
+    <div style="padding-top:10px">
+      <div class="row">
+        <div class="fld"><label class="f">Заголовок</label><input type="text" id="bnTitle" style="width:280px"></div>
+        <div class="fld"><label class="f">Подпись внизу</label><input type="text" id="bnTagline" style="width:220px"></div>
+      </div>
+      <div class="row">
+        <div class="fld full"><label class="f">Номинация (необязательно)</label><input type="text" id="bnNomination" class="full" placeholder="например: Самый активный и весёлый столик"></div>
+      </div>
+      <div class="row">
+        <div class="fld full"><label class="f">Ссылка для QR-кода (необязательно — соцсеть, Telegram и т.д.)</label><input type="text" id="bnQrUrl" class="full" placeholder="https://..."></div>
+      </div>
+      <p style="font-size:12px;color:#4a4868;margin:2px 0 0">Строка «N раунд: Собери комбинацию…» подставляется автоматически по номеру блока.</p>
+    </div>
+  </details>
+
   <div class="sync-actions">
-    <button id="btnBlanksGenerate">Сгенерировать и сохранить</button>
-    <button class="sec" id="btnBlanksOpenSaved">Открыть сохранённые</button>
+    <button id="btnBlanksPdf">Скачать PDF бланков</button>
+    <button class="sec" id="btnBlanksTracklist" title="Блок, номер, название, исполнитель + проверка на повторы">Скачать список треков (.txt)</button>
     <span class="status" id="blanksStatus"></span>
     <div style="flex:1"></div>
     <button class="gh" id="btnBlanksClose">Закрыть</button>
@@ -389,135 +405,127 @@ audio.addEventListener('timeupdate', ()=>{
 audio.addEventListener('loadedmetadata', ()=>$('tDur').textContent=fmt(audio.duration));
 window.addEventListener('resize', ()=>positionTrack(lastActive<0?0:lastActive));
 
-/* ========== БЛАНКИ ДЛЯ УЧАСТНИКОВ ========== */
-function trackLabel(id){
-  const t=trackById(bank,id);
-  if(!t) return '—';
-  const parts=[]; if(t.artist) parts.push(t.artist); parts.push(t.title||'Без названия');
-  return parts.join(' - ');
+/* ========== БЛАНКИ ДЛЯ УЧАСТНИКОВ ==========
+   Раньше бланки собирались прямо здесь, в браузере, из текущей раскладки
+   активного раунда, и открывались отдельной вкладкой «на печать». Беда была в
+   том, что раскладка на экране живёт и меняется до последней минуты — уже
+   напечатанные бланки легко расходились с тем, что реально прозвучит, и
+   заметить это было негде. Плюс собирать приходилось по одному раунду за раз.
+
+   Теперь источник ровно один — снимок СОХРАНЁННОЙ игры, где раскладка блоков
+   уже зафиксирована. Клиенту остаётся выбрать игру, указать число участников
+   и скачать готовый PDF: всю сборку и вёрстку делает сервер
+   (/api/saved-games/:id/blanks.pdf, отрисовка — lib/blanks-pdf.js). */
+
+// Оформление бланков одно на все игры и живёт в общих настройках рядом с
+// раундами — чтобы номинацию и ссылку для QR не вбивать заново каждый раз.
+function blanksDesign(){
+  return Object.assign({
+    title: 'МУЗЫКАЛЬНОЕ ЛОТО', tagline: 'Давайте общаться!', nomination: '', qrUrl: '',
+  }, settings.blanksDesign || {});
 }
-function blankPoolIds(roundIdx){
-  const r=settings.rounds[roundIdx];
-  return [...new Set(Object.values(r.map||{}).filter(Boolean))];
-}
-function buildBlankCards(roundIdx, opts){
-  const poolIds=blankPoolIds(roundIdx);
-  if(!poolIds.length) return null;
-  const cols=5;
-  const cellCount=Math.min(25, poolIds.length);
-  const rows=Math.ceil(cellCount/cols);
-  const cards=[];
-  for(let i=0;i<opts.count;i++) cards.push(shuffleArr(poolIds).slice(0,cellCount));
-  return { cols, rows, cellCount, cards,
-    title:opts.title, roundLabel:opts.roundLabel, nomination:opts.nomination,
-    tagline:opts.tagline, qrUrl:opts.qrUrl, generatedAt:Date.now() };
-}
-function blanksArrowSvg(){
-  return `<svg width="86" height="56" viewBox="0 0 86 56"><path d="M4,10 C38,4 52,44 74,40" stroke="#000" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M61,32 L76,42 L60,48" stroke="#000" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-}
-function renderBlanksDoc(blanks){
-  const cardsHtml=blanks.cards.map(cardIds=>{
-    let rowsHtml='';
-    for(let ri=0; ri<blanks.rows; ri++){
-      let cellsHtml='';
-      for(let ci=0; ci<blanks.cols; ci++){
-        const idx=ri*blanks.cols+ci;
-        cellsHtml += idx<cardIds.length
-          ? `<td>${escapeHtml(trackLabel(cardIds[idx]))}</td>`
-          : `<td class="empty">—</td>`;
-      }
-      rowsHtml += `<tr>${cellsHtml}</tr>`;
-    }
-    const qrHtml = blanks.qrUrl ? `<div class="qrWrap">${blanksArrowSvg()}<img class="qr" src="https://api.qrserver.com/v1/create-qr-code/?size=170x170&data=${encodeURIComponent(blanks.qrUrl)}" alt="QR"></div>` : '';
-    return `<div class="card">
-      <h1>${escapeHtml(blanks.title||'МУЗЫКАЛЬНОЕ ЛОТО')}</h1>
-      <table class="grid"><tbody>${rowsHtml}</tbody></table>
-      <div class="footer">
-        ${blanks.roundLabel ? `<div class="line1">${escapeHtml(blanks.roundLabel)}</div>` : ''}
-        ${blanks.nomination ? `<div class="line2">Номинация <i>${escapeHtml(blanks.nomination)}</i></div>` : ''}
-        ${blanks.tagline ? `<div class="line3">${escapeHtml(blanks.tagline)}</div>` : ''}
-      </div>
-      ${qrHtml}
-    </div>`;
-  }).join('');
-  return `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
-  <title>Бланки — ${escapeHtml(blanks.title||'МУЗЫКАЛЬНОЕ ЛОТО')}</title>
-  <style>
-    @page { size: A4; margin: 12mm; }
-    * { box-sizing:border-box; }
-    body { font-family: Arial, Helvetica, sans-serif; color:#000; background:#fff; margin:0; }
-    .card { page-break-after:always; padding:8mm 4mm; }
-    .card:last-child { page-break-after:auto; }
-    .card h1 { font-size:38px; font-weight:900; text-align:center; letter-spacing:.01em; margin:0 0 16px; }
-    table.grid { width:100%; border-collapse:collapse; table-layout:fixed; }
-    table.grid td { border:2px solid #000; padding:12px 6px; text-align:center; font-weight:700;
-                    font-size:14px; line-height:1.25; vertical-align:middle; height:64px; }
-    table.grid td.empty { color:#ccc; border-color:#999; }
-    .footer { margin-top:18px; }
-    .footer .line1 { font-size:19px; font-weight:800; }
-    .footer .line2 { font-size:17px; font-weight:700; margin-top:6px; }
-    .footer .line2 i { font-weight:600; font-style:italic; }
-    .footer .line3 { font-size:19px; font-weight:800; margin-top:10px; }
-    .qrWrap { display:flex; align-items:flex-end; justify-content:flex-end; gap:8px; margin-top:16px; }
-    .qrWrap .qr { width:150px; height:150px; }
-    .toolbar { padding:14px; text-align:center; }
-    .toolbar button { font-size:15px; padding:9px 22px; border-radius:8px; border:0;
-                       background:#ff2e63; color:#fff; font-weight:700; cursor:pointer; }
-    @media print { .toolbar { display:none; } }
-  </style></head><body>
-  <div class="toolbar"><button onclick="window.print()">Печать / Сохранить как PDF</button></div>
-  ${cardsHtml}
-  </body></html>`;
-}
-function openBlanksModal(){
-  const idx=settings.activeRound;
-  const r=settings.rounds[idx];
-  const poolIds=blankPoolIds(idx);
-  say('blanksPoolInfo', !poolIds.length
-    ? `Раунд ${idx+1}: треки ещё не расставлены — сначала настройте раунд.`
-    : `Раунд ${idx+1}${r.category?' · '+r.category:''}: доступно ${poolIds.length} треков для бланка (карточка вместит до ${Math.min(25,poolIds.length)}).`);
-  const saved=r.blanks;
-  $('bnCount').value = saved ? saved.cards.length : 20;
-  $('bnTitle').value = saved ? saved.title : 'МУЗЫКАЛЬНОЕ ЛОТО';
-  $('bnRoundLabel').value = saved ? saved.roundLabel : `${idx+1} раунд: Собери комбинацию по вертикали или горизонтали`;
-  $('bnNomination').value = saved ? (saved.nomination||'') : '';
-  $('bnTagline').value = saved ? saved.tagline : 'Давайте общаться!';
-  $('bnQrUrl').value = saved ? (saved.qrUrl||'') : '';
-  say('blanksStatus', saved ? `Сохранено ${saved.cards.length} бланков (${new Date(saved.generatedAt).toLocaleString('ru')})` : '');
-  $('btnBlanksOpenSaved').disabled=!saved;
+let blanksGames = [];
+
+async function openBlanksModal(){
   $('blanksView').classList.add('on');
+  const d = blanksDesign();
+  $('bnTitle').value = d.title;
+  $('bnTagline').value = d.tagline;
+  $('bnNomination').value = d.nomination;
+  $('bnQrUrl').value = d.qrUrl;
+
+  const sel = $('bnGame');
+  sel.innerHTML = '<option value="">Загрузка…</option>';
+  say('blanksStatus', '');
+  try { blanksGames = await apiListSavedGames(); }
+  catch(e){ blanksGames = []; }
+
+  if(!blanksGames.length){
+    sel.innerHTML = '<option value="">— нет сохранённых игр —</option>';
+    say('blanksPoolInfo', 'Сначала нажмите «Сохранить игру» — бланки строятся по сохранённой игре.', true);
+    $('btnBlanksPdf').disabled = true;
+    $('btnBlanksTracklist').disabled = true;
+    return;
+  }
+  $('btnBlanksPdf').disabled = false;
+  $('btnBlanksTracklist').disabled = false;
+  sel.innerHTML = blanksGames.map(g =>
+    `<option value="${escapeHtml(g.id)}">${escapeHtml(g.name)} — ${new Date(g.createdAt).toLocaleDateString('ru')} · ${g.roundsCount} блок(ов)</option>`).join('');
+  // Запоминаем последнюю выбранную игру: обычно бланки печатают в несколько
+  // заходов (сначала пробный лист, потом весь тираж) — каждый раз искать её
+  // в списке заново незачем.
+  sel.value = (settings.blanksGameId && blanksGames.some(g => g.id === settings.blanksGameId))
+    ? settings.blanksGameId : blanksGames[0].id;
+  updateBlanksInfo();
 }
-$('btnBlanks').onclick=openBlanksModal;
-$('btnBlanksClose').onclick=()=>$('blanksView').classList.remove('on');
-$('btnBlanksGenerate').onclick=()=>{
-  const idx=settings.activeRound;
-  const count=Math.max(1, Math.min(200, +$('bnCount').value||20));
-  const opts={
-    count,
-    title:$('bnTitle').value.trim()||'МУЗЫКАЛЬНОЕ ЛОТО',
-    roundLabel:$('bnRoundLabel').value.trim(),
-    nomination:$('bnNomination').value.trim(),
-    tagline:$('bnTagline').value.trim(),
-    qrUrl:$('bnQrUrl').value.trim(),
+
+function updateBlanksInfo(){
+  const g = blanksGames.find(x => x.id === $('bnGame').value);
+  if(!g) return say('blanksPoolInfo', '');
+  const players = Math.max(1, Math.min(300, +$('bnCount').value || 1));
+  const pages = g.roundsCount * players;
+  let msg = `${g.roundsCount} блок(ов) · ${g.trackCount} треков · получится ${pages} лист(ов): по ${g.roundsCount} на каждого участника`;
+
+  // Клеток на бланке всегда 25. Если в блоке треков меньше — часть клеток
+  // будет пустой, и узнать об этом лучше сейчас, а не разглядывая уже
+  // напечатанную пачку из ста листов.
+  const small = (g.roundSizes || []).map((n, i) => ({ n, i })).filter(x => x.n < 25);
+  if(small.length){
+    msg += '<br><span style="color:#ffb020">Внимание: ' + small.map(x =>
+      `в блоке ${x.i + 1} всего ${x.n} трек(ов) — ${25 - x.n} клеток на бланке останутся пустыми`).join('; ') + '.</span>';
+  }
+  say('blanksPoolInfo', msg);
+}
+
+function saveBlanksDesign(){
+  settings.blanksDesign = {
+    title: $('bnTitle').value.trim() || 'МУЗЫКАЛЬНОЕ ЛОТО',
+    tagline: $('bnTagline').value.trim(),
+    nomination: $('bnNomination').value.trim(),
+    qrUrl: $('bnQrUrl').value.trim(),
   };
-  const blanks=buildBlankCards(idx, opts);
-  if(!blanks) return say('blanksStatus','В этом раунде ещё нет расставленных треков', true);
-  settings.rounds[idx].blanks=blanks;
+  settings.blanksGameId = $('bnGame').value;
   apiSaveSettings(settings);
-  say('blanksStatus', `Сохранено ${blanks.cards.length} бланков ✓`);
-  $('btnBlanksOpenSaved').disabled=false;
-  const win=window.open('', '_blank');
-  if(!win) return say('blanksStatus','Браузер заблокировал открытие окна — разрешите всплывающие окна для этого сайта и нажмите «Открыть сохранённые»', true);
-  win.document.open(); win.document.write(renderBlanksDoc(blanks)); win.document.close();
+  return settings.blanksDesign;
+}
+
+$('btnBlanks').onclick = openBlanksModal;
+$('btnBlanksClose').onclick = () => $('blanksView').classList.remove('on');
+$('bnGame').onchange = updateBlanksInfo;
+$('bnCount').oninput = updateBlanksInfo;
+
+$('btnBlanksPdf').onclick = () => {
+  const id = $('bnGame').value;
+  if(!id) return say('blanksStatus', 'Выберите сохранённую игру', true);
+  const players = Math.max(1, Math.min(300, +$('bnCount').value || 1));
+  $('bnCount').value = players;
+  const d = saveBlanksDesign();
+  const q = new URLSearchParams({ players, title: d.title, tagline: d.tagline, nomination: d.nomination, qrUrl: d.qrUrl });
+  // PDF стримится по мере отрисовки, поэтому обычная навигация подходит лучше
+  // fetch+Blob: браузер сам показывает скачивание, а память не забивается
+  // сотней страниц целиком.
+  say('blanksStatus', `Готовим PDF на ${players} участник(ов)…`);
+  window.location.href = `/api/saved-games/${encodeURIComponent(id)}/blanks.pdf?${q}`;
+  setTimeout(() => say('blanksStatus', 'PDF отправлен в загрузки'), 1800);
 };
-$('btnBlanksOpenSaved').onclick=()=>{
-  const idx=settings.activeRound;
-  const blanks=settings.rounds[idx].blanks;
-  if(!blanks) return say('blanksStatus','Для этого раунда ещё нет сохранённых бланков', true);
-  const win=window.open('', '_blank');
-  if(!win) return say('blanksStatus','Браузер заблокировал открытие окна — разрешите всплывающие окна для этого сайта', true);
-  win.document.open(); win.document.write(renderBlanksDoc(blanks)); win.document.close();
+
+$('btnBlanksTracklist').onclick = () => {
+  const id = $('bnGame').value;
+  if(!id) return say('blanksStatus', 'Выберите сохранённую игру', true);
+  downloadTrackList(id);
+  say('blanksStatus', 'Список отправлен в загрузки');
 };
+
+/* Состав игры текстом: блок, номер, название, исполнитель + проверка на
+   повторы. Открываем в соседней вкладке (сервер отдаёт inline), оттуда при
+   желании сохраняется как файл. Нужно, чтобы перед печатью убедиться, что
+   один и тот же трек не попал в два блока: за игру он должен звучать раз. */
+function openTrackList(id){
+  window.open(`/api/saved-games/${encodeURIComponent(id)}/tracklist`, '_blank');
+}
+function downloadTrackList(id){
+  window.location.href = `/api/saved-games/${encodeURIComponent(id)}/tracklist?download=1`;
+}
 
 /* ========== СОХРАНЁННЫЕ ИГРЫ (для оффлайн-скачивания) ========== */
 async function apiListSavedGames(){ const r=await fetch('/api/saved-games'); if(!r.ok) return []; return r.json(); }
@@ -588,10 +596,14 @@ async function renderSavedGames(){
     const row=document.createElement('div'); row.className='sg-row';
     row.innerHTML=`<div class="tt">${escapeHtml(g.name)}<small>${new Date(g.createdAt).toLocaleString('ru')} · ${g.roundsCount} раунд(ов) · ${g.trackCount} треков</small>
         <small data-dl-status style="display:block"></small></div>
+      <button class="sec" data-list title="Блок, номер, название, исполнитель + проверка на повторы">Список треков</button>
       <button class="sec" data-dl>Скачать игру</button>
       <button class="gh" data-del>Удалить</button>`;
     const dlBtn=row.querySelector('[data-dl]'), dlStatus=row.querySelector('[data-dl-status]');
     dlBtn.onclick=()=>downloadSavedGame(g.id, g.name, dlStatus, dlBtn);
+    // Здесь — «посмотреть»: список открывается соседней вкладкой прямо в
+    // браузере. Кнопка «скачать .txt файлом» живёт в модалке бланков.
+    row.querySelector('[data-list]').onclick=()=>openTrackList(g.id);
     row.querySelector('[data-del]').onclick=async()=>{
       if(!confirm(`Удалить сохранённую игру «${g.name}»? Уже скачанные ранее архивы не пострадают.`)) return;
       await apiDeleteSavedGame(g.id);
