@@ -541,10 +541,48 @@ function fmtBytes(n){
   if(n<1024*1024) return (n/1024).toFixed(0)+' КБ';
   return (n/1024/1024).toFixed(1)+' МБ';
 }
+/* Сборка архива идёт на сервере фоном, здесь мы её только ждём, коротко
+   спрашивая статус. Раньше это был один длинный запрос на всё время сборки:
+   на большой игре он молчал минутами, обратный прокси рвал соединение, и
+   надпись «Готовим архив…» оставалась навсегда — ответа уже никто не слал.
+   Опрос переживает такие обрывы: сборка на сервере продолжается сама по себе,
+   а мы просто спрашиваем ещё раз. */
+async function waitForZip(id, statusEl){
+  let lastDone = -1, first = true;
+  while(true){
+    const r = await fetch('/api/saved-games/'+encodeURIComponent(id)+'/prepare', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      // Повторить упавшую сборку просим только первым запросом — то есть по
+      // нажатию кнопки. Дальше это просто опрос прогресса.
+      body: JSON.stringify({ retry: first }),
+    });
+    first = false;
+    if(!r.ok) throw new Error('Сервер ответил ошибкой ('+r.status+')');
+    const st = await r.json();
+
+    if(st.state === 'ready') return st;
+    if(st.state === 'error') throw new Error(st.error || 'сборка архива не удалась');
+
+    if(st.done !== lastDone){
+      lastDone = st.done;
+      statusEl.textContent = st.total
+        ? `Готовим архив: ${st.done} из ${st.total} файлов…`
+        : 'Готовим архив…';
+    }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+}
 async function downloadSavedGame(id, name, statusEl, btnEl){
   btnEl.disabled = true;
-  statusEl.textContent = 'Готовим архив… (может занять до минуты при первом скачивании)';
+  statusEl.textContent = 'Готовим архив…';
   try{
+    const built = await waitForZip(id, statusEl);
+    if(built.failed){
+      // Не молчим про недокачанные файлы: архив собран, но часть треков в нём
+      // будет без аудио или обложки, и узнать об этом лучше сейчас, а не на
+      // мероприятии без интернета.
+      statusEl.textContent = `Внимание: ${built.failed} файл(ов) не удалось скачать из хранилища. Качаем архив…`;
+    }
     const resp = await fetch('/api/saved-games/'+encodeURIComponent(id)+'/download');
     if(!resp.ok) throw new Error('Сервер ответил ошибкой ('+resp.status+')');
     const total = +resp.headers.get('Content-Length') || 0;

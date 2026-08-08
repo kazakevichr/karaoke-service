@@ -15,6 +15,7 @@ const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = re
 const archiver = require('archiver');
 const { buildTrackListText } = require('./lib/tracklist');
 const { streamBlanksPdf, MAX_PLAYERS } = require('./lib/blanks-pdf');
+const { ensureBuild: ensureZipBuild, forgetJob: forgetZipJob } = require('./lib/offline-zip');
 
 const app = express();
 app.use(cors());
@@ -359,6 +360,7 @@ app.delete('/api/saved-games/:id', (req, res) => {
     // Подчищаем закэшированный архив, если он был собран (см. ZIP_CACHE_DIR) —
     // иначе он останется на диске бесполезным мусором.
     fs.unlink(path.join(ZIP_CACHE_DIR, `${req.params.id}.zip`), () => {});
+    forgetZipJob(req.params.id);
     res.json({ ok: true });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
@@ -438,151 +440,74 @@ app.get('/api/saved-games/:id/blanks.pdf', async (req, res) => {
   }
 });
 
-// Собирает ZIP с оффлайн-версией конкретной сохранённой игры: HTML-плеер без
-// сети (сетка чисел, розыгрыш, караоке, бланки — без редактора банка) + аудио
-// и обложки рядом файлами. Архив сначала полностью собирается во временный
-// файл на диске (каждый аудио/фото идёт из S3 прямо в архив как поток, без
-// буферизации в памяти), и только потом отдаётся клиенту — так браузер сразу
-// знает точный вес файла (Content-Length) и может показать честный прогресс,
-// а не индикатор «качается неизвестно сколько».
-const OFFLINE_TEMPLATE_PATH = path.join(__dirname, 'public', 'offline-template.html');
-// Сколько файлов качаем из S3 одновременно при сборке архива. Раньше это
-// было строго по одному (see git history) — для игры на полсотни треков
-// это 100+ последовательных запросов по ~150мс каждый, т.е. 15-20+ секунд
-// ТОЛЬКО на ожидание S3, прежде чем архив вообще начнёт течь пользователю.
-const ZIP_S3_CONCURRENCY = 8;
+/* ============ ОФФЛАЙН-АРХИВ СОХРАНЁННОЙ ИГРЫ ============
+   ZIP с автономной версией игры: HTML-плеер без сети (сетка чисел, розыгрыш,
+   караоке, бланки — без редактора банка) плюс аудио и обложки рядом файлами.
 
-// Отдаёт уже готовый файл архива клиенту: с точным Content-Length (чтобы
-// браузер/наш fetch-код на клиенте знали вес и могли показать честный
-// прогресс), затем стримит содержимое.
-function sendZipFile(req, res, filePath, safeName, log) {
-  const size = fs.statSync(filePath).size;
-  res.setHeader('Content-Type', 'application/zip');
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}.zip"`);
-  res.setHeader('Content-Length', size);
-  log('отдаю файл клиенту, размер:', size);
-  const stream = fs.createReadStream(filePath);
-  stream.on('error', e => { log('ошибка чтения файла:', e.message); if (!res.headersSent) res.status(500).end(); });
-  stream.pipe(res);
+   Сборка вынесена в lib/offline-zip.js и идёт ФОНОМ, а не внутри HTTP-запроса.
+   Раньше клиент висел на одном длинном запросе всё время сборки, не получая
+   ни байта: на игре в 90 треков это минуты молчания, которые обратный прокси
+   разрывает — и «Готовим архив…» оставалось на экране навсегда, потому что
+   ответа уже никто не пришлёт. Теперь клиент коротко спрашивает статус, а
+   готовый архив скачивает отдельным быстрым запросом с точным Content-Length.
+   Подробный разбор второй, более коварной причины зависания (очередь
+   архиватора против пула сокетов S3) — в шапке lib/offline-zip.js. */
+const OFFLINE_TEMPLATE_PATH = path.join(__dirname, 'public', 'offline-template.html');
+
+function zipCtx(id, row, log) {
+  return {
+    id, row, log,
+    cachePath: path.join(ZIP_CACHE_DIR, `${id}.zip`),
+    templatePath: OFFLINE_TEMPLATE_PATH,
+    s3: s3Enabled ? s3 : null,
+    s3Bucket: process.env.S3_BUCKET,
+    GetObjectCommand,
+  };
 }
 
-app.get('/api/saved-games/:id/download', async (req, res) => {
+/* Идемпотентно: запускает сборку, если архива ещё нет, и в любом случае
+   возвращает текущее состояние. Клиент дёргает этот же маршрут и для старта,
+   и для опроса прогресса — поэтому после перезапуска сервера не бывает
+   ситуации «опрашиваем сборку, которую никто не запускал». */
+app.post('/api/saved-games/:id/prepare', (req, res) => {
   const t0 = Date.now();
-  const log = (...args) => console.log(`[download ${req.params.id} +${Date.now() - t0}ms]`, ...args);
-  const cachePath = path.join(ZIP_CACHE_DIR, `${req.params.id}.zip`);
-  let tmpCachePath = null;
+  const log = (...a) => console.log(`[zip ${req.params.id} +${Date.now() - t0}ms]`, ...a);
   try {
-    log('старт');
+    const row = db.prepare('SELECT * FROM saved_games WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Игра не найдена' });
+    // retry:true приходит только с первого нажатия «Скачать игру» — повтор
+    // упавшей сборки должен быть осознанным действием, а не побочным
+    // эффектом опроса прогресса.
+    res.json(ensureZipBuild(zipCtx(req.params.id, row, log), { retry: !!(req.body || {}).retry }));
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// Отдаёт уже собранный архив: быстро и с точным Content-Length, чтобы браузер
+// показал честный процент скачивания. Саму сборку этот маршрут не запускает —
+// за неё отвечает /prepare выше.
+app.get('/api/saved-games/:id/download', (req, res) => {
+  try {
     const row = db.prepare('SELECT * FROM saved_games WHERE id = ?').get(req.params.id);
     if (!row) return res.status(404).json({ error: 'Игра не найдена' });
 
-    const safeName = (row.name || 'game').replace(/[^a-zA-Zа-яА-Я0-9 _-]/g, '').trim() || 'game';
-
-    // Сохранённая игра — неизменный снимок (см. /api/saved-games POST): один
-    // раз собранный архив можно отдавать повторно мгновенно, без пересборки.
-    if (fs.existsSync(cachePath)) {
-      log('архив уже в кэше:', cachePath);
-      sendZipFile(req, res, cachePath, safeName, log);
-      return;
+    const cachePath = path.join(ZIP_CACHE_DIR, `${req.params.id}.zip`);
+    if (!fs.existsSync(cachePath)) {
+      // 409, а не 404: игра существует, просто архив ещё не собран. Клиент по
+      // этому коду понимает, что надо сначала вызвать /prepare.
+      return res.status(409).json({ error: 'Архив ещё не собран', hint: 'prepare' });
     }
 
-    const data = JSON.parse(row.data);
-    log('запись из БД получена, треков:', Object.keys(data.tracks || {}).length);
-
-    let template;
-    try { template = fs.readFileSync(OFFLINE_TEMPLATE_PATH, 'utf8'); }
-    catch (e) { return res.status(500).json({ error: 'Оффлайн-шаблон не найден на сервере' }); }
-    log('шаблон прочитан, размер:', template.length);
-
-    const offlineTracks = {};
-    for (const [tid, t] of Object.entries(data.tracks || {})) {
-      const audioExt = t.audioKey ? (path.extname(t.audioKey) || '.mp3') : null;
-      const photoExt = t.photoKey ? (path.extname(t.photoKey) || '.jpg') : null;
-      offlineTracks[tid] = {
-        id: t.id, title: t.title, artist: t.artist, album: t.album, hook: t.hook,
-        lyrics: t.lyrics, lines: t.lines, syncPct: t.syncPct,
-        audioFile: audioExt ? `audio/${tid}${audioExt}` : null,
-        photoFile: photoExt ? `photos/${tid}${photoExt}` : null,
-      };
-    }
-    const offlineData = { name: row.name, savedAt: row.createdAt, rounds: data.rounds, tracks: offlineTracks };
-    const html = template.replace(
-      '/*__GAME_DATA__*/null',
-      JSON.stringify(offlineData).replace(/</g, '\\u003c')
-    );
-    log('HTML собран, размер:', html.length);
-
-    const archive = archiver('zip', { zlib: { level: 6 } });
-    archive.on('warning', w => log('архив warning:', w.message));
-    archive.on('entry', entry => log('архив entry добавлен:', entry.name));
-    archive.on('end', () => log('архив end (все данные переданы в поток)'));
-
-    // Сначала архив полностью собирается во временный файл на диске — и
-    // только когда он готов, отдаём его клиенту одним куском с точным
-    // Content-Length (см. sendZipFile выше). Так браузер/наш прогресс-бар на
-    // клиенте видят реальный вес файла с самого начала скачивания, а не
-    // просто индикатор "качается неизвестно сколько".
-    tmpCachePath = `${cachePath}.tmp-${process.pid}-${Date.now()}`;
-    const cacheStream = fs.createWriteStream(tmpCachePath);
-    const archiveDone = new Promise((resolve, reject) => {
-      archive.on('error', reject);
-      cacheStream.on('error', reject);
-      cacheStream.on('close', resolve);
+    const size = fs.statSync(cachePath).size;
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', contentDisposition(row.name, 'zip'));
+    res.setHeader('Content-Length', size);
+    const stream = fs.createReadStream(cachePath);
+    stream.on('error', e => {
+      console.error('[download] ошибка чтения архива:', e.message);
+      if (!res.headersSent) res.status(500).end();
     });
-    archive.pipe(cacheStream);
-
-    // игра.html — обычный текст, сжимать его дёшево и есть смысл (в разы
-    // меньше исходного размера). А вот аудио/фото ниже сжимаем без deflate —
-    // mp3/jpg и так уже сжаты форматом, повторное сжатие впустую грузит CPU
-    // маленького VPS и не даёт выигрыша в размере архива.
-    archive.append(html, { name: 'игра.html' });
-    log('игра.html добавлена в очередь архива');
-
-    if (s3Enabled) {
-      // Собираем плоский список файлов на скачивание (аудио+фото по каждому
-      // треку) и разбираем его несколькими параллельными «воркерами» вместо
-      // строго последовательного цикла — это и есть основной выигрыш в скорости.
-      const jobs = [];
-      for (const [tid, t] of Object.entries(data.tracks || {})) {
-        if (t.audioKey) jobs.push({ tid, key: t.audioKey, kind: 'аудио', folder: 'audio', defExt: '.mp3' });
-        if (t.photoKey) jobs.push({ tid, key: t.photoKey, kind: 'фото', folder: 'photos', defExt: '.jpg' });
-      }
-      let jobIdx = 0;
-      async function worker() {
-        while (jobIdx < jobs.length) {
-          const job = jobs[jobIdx++];
-          try {
-            log(`${job.kind} ${job.tid}: запрос S3 начат, key=${job.key}`);
-            const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: job.key }));
-            log(`${job.kind} ${job.tid}: ответ S3 получен`);
-            const ext = path.extname(job.key) || job.defExt;
-            archive.append(obj.Body, { name: `${job.folder}/${job.tid}${ext}`, store: true });
-            log(`${job.kind} ${job.tid}: добавлено в архив`);
-          } catch (e) { log(`${job.kind} ${job.tid}: ОШИБКА S3:`, e.message); }
-        }
-      }
-      const workerCount = Math.min(ZIP_S3_CONCURRENCY, jobs.length);
-      await Promise.all(Array.from({ length: workerCount }, worker));
-    } else {
-      log('s3Enabled=false — файлы не добавляются, только игра.html');
-    }
-
-    log('вызываю archive.finalize()');
-    await archive.finalize();
-    await archiveDone;
-    log('архив полностью собран на диске');
-
-    await fsp.rename(tmpCachePath, cachePath);
-    log('кэш архива сохранён:', cachePath);
-
-    sendZipFile(req, res, cachePath, safeName, log);
-  } catch (e) {
-    log('ИСКЛЮЧЕНИЕ:', e.message);
-    console.error(e);
-    if (tmpCachePath) fs.unlink(tmpCachePath, () => {});
-    if (!res.headersSent) res.status(500).json({ error: e.message });
-    else { try { res.end(); } catch {} }
-  }
+    stream.pipe(res);
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/transcribe', requireAuth, (req, res) => {
