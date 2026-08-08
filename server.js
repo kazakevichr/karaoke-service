@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const Database = require('better-sqlite3');
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { Upload } = require('@aws-sdk/lib-storage');
 const archiver = require('archiver');
 const { buildTrackListText } = require('./lib/tracklist');
 const { streamBlanksPdf, MAX_PLAYERS } = require('./lib/blanks-pdf');
@@ -360,6 +361,10 @@ app.delete('/api/saved-games/:id', (req, res) => {
     // Подчищаем закэшированный архив, если он был собран (см. ZIP_CACHE_DIR) —
     // иначе он останется на диске бесполезным мусором.
     fs.unlink(path.join(ZIP_CACHE_DIR, `${req.params.id}.zip`), () => {});
+    fs.unlink(path.join(ZIP_CACHE_DIR, `${req.params.id}.zip.url`), () => {});
+    // Архив лежит ещё и в S3 (см. uploadOfflineZip) — иначе удалённые игры
+    // копили бы там по гигабайту каждая.
+    if (s3Enabled) s3Delete(offlineZipKey(req.params.id));
     forgetZipJob(req.params.id);
     res.json({ ok: true });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
@@ -454,6 +459,28 @@ app.get('/api/saved-games/:id/blanks.pdf', async (req, res) => {
    архиватора против пула сокетов S3) — в шапке lib/offline-zip.js. */
 const OFFLINE_TEMPLATE_PATH = path.join(__dirname, 'public', 'offline-template.html');
 
+/* Выгрузка готового архива в S3 многочастной загрузкой: почти гигабайтный
+   файл одним PUT слать не стоит — любой обрыв означал бы начинать сначала,
+   а тут части повторяются по отдельности. Заодно получаем прогресс, чтобы
+   пользователь видел, что происходит, а не смотрел в застывшую надпись. */
+async function uploadOfflineZip(filePath, key, onProgress) {
+  const up = new Upload({
+    client: s3,
+    params: {
+      Bucket: process.env.S3_BUCKET, Key: key,
+      Body: fs.createReadStream(filePath),
+      ContentType: 'application/zip', ACL: 'public-read',
+    },
+    partSize: 16 * 1024 * 1024,
+    queueSize: 3,
+  });
+  up.on('httpUploadProgress', p => onProgress(p.loaded || 0));
+  await up.done();
+  return s3PublicUrl(key);
+}
+
+const offlineZipKey = id => `offline-games/${id}.zip`;
+
 function zipCtx(id, row, log) {
   return {
     id, row, log,
@@ -462,6 +489,11 @@ function zipCtx(id, row, log) {
     s3: s3Enabled ? s3 : null,
     s3Bucket: process.env.S3_BUCKET,
     GetObjectCommand,
+    // Готовый архив уезжает в хранилище, и клиент качает его оттуда напрямую.
+    // Канал самого сервера приложения для гигабайтных файлов непригоден —
+    // подробности в комментарии к выгрузке в lib/offline-zip.js.
+    uploadZip: s3Enabled ? uploadOfflineZip : null,
+    zipKey: offlineZipKey(id),
   };
 }
 

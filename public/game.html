@@ -575,7 +575,14 @@ async function waitForZip(id, statusEl){
     if(st.state === 'ready') return st;
     if(st.state === 'error') throw new Error(st.error || 'сборка архива не удалась');
 
-    if(st.done !== lastDone){
+    if(st.state === 'uploading'){
+      // Отдельный этап: архив собран и переезжает в хранилище, откуда его
+      // потом заберёт браузер напрямую. Без этой надписи выглядело бы как
+      // повторное зависание на «180 из 180».
+      statusEl.textContent = st.bytes
+        ? `Архив собран, переносим в хранилище: ${fmtBytes(st.uploaded||0)} из ${fmtBytes(st.bytes)} (${Math.round((st.uploaded||0)/st.bytes*100)}%)`
+        : 'Архив собран, переносим в хранилище…';
+    } else if(st.done !== lastDone){
       lastDone = st.done;
       statusEl.textContent = st.total
         ? `Готовим архив: ${st.done} из ${st.total} файлов${fmtEta(t0, st.done, st.total)}${st.bytes ? ' · ' + fmtBytes(st.bytes) : ''}`
@@ -605,12 +612,17 @@ async function downloadSavedGame(id, name, statusEl, btnEl){
        и оставшееся время, умеет продолжить прерванную закачку и пишет сразу
        на диск. Имя файла придёт из Content-Disposition, оно там уже
        выставлено правильно, с кириллицей. */
+    /* Качаем прямо из хранилища, если архив туда доехал. Через сам сервер
+       приложения такой файл идёт со скоростью около 60 КБ/с — почти гигабайт
+       растянулся бы на часы. Хранилище отдаёт быстро: на нём и так работает
+       всё аудио в онлайн-игре. Запасной путь через сервер остаётся на случай,
+       если выгрузка не удалась. */
     statusEl.textContent = `Архив готов${built.bytes ? ' — ' + fmtBytes(built.bytes) : ''}. Скачивание идёт в браузере (прогресс — в его загрузках).`;
     // Ссылка с download, а не переход по location: если сервер вдруг ответит
     // ошибкой (например, игру удалили между сборкой и скачиванием), страница
     // игры останется на месте, а не уедет на JSON с текстом ошибки.
     const a = document.createElement('a');
-    a.href = '/api/saved-games/'+encodeURIComponent(id)+'/download';
+    a.href = built.url || ('/api/saved-games/'+encodeURIComponent(id)+'/download');
     a.download = ((name||'game').replace(/[\\/:*?"<>|]/g,'').trim() || 'game') + '.zip';
     document.body.appendChild(a); a.click(); a.remove();
   }catch(e){
