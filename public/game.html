@@ -547,8 +547,20 @@ function fmtBytes(n){
    надпись «Готовим архив…» оставалась навсегда — ответа уже никто не слал.
    Опрос переживает такие обрывы: сборка на сервере продолжается сама по себе,
    а мы просто спрашиваем ещё раз. */
+/* Оценка остатка по средней скорости с начала сборки. Намеренно грубая и
+   округлённая: точность тут никому не нужна, нужен ответ на вопрос «это
+   секунды или полчаса», чтобы ожидание не выглядело зависанием. Пока сделано
+   меньше трёх файлов, средняя ещё бессмысленна — молчим. */
+function fmtEta(t0, done, total){
+  if(done < 3 || done >= total) return '';
+  const left = Math.round((Date.now() - t0) / done * (total - done) / 1000);
+  if(left < 10) return '';
+  if(left < 90) return ` · осталось ~${left} с`;
+  return ` · осталось ~${Math.round(left / 60)} мин`;
+}
 async function waitForZip(id, statusEl){
   let lastDone = -1, first = true;
+  const t0 = Date.now();
   while(true){
     const r = await fetch('/api/saved-games/'+encodeURIComponent(id)+'/prepare', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -566,7 +578,7 @@ async function waitForZip(id, statusEl){
     if(st.done !== lastDone){
       lastDone = st.done;
       statusEl.textContent = st.total
-        ? `Готовим архив: ${st.done} из ${st.total} файлов…`
+        ? `Готовим архив: ${st.done} из ${st.total} файлов${fmtEta(t0, st.done, st.total)}${st.bytes ? ' · ' + fmtBytes(st.bytes) : ''}`
         : 'Готовим архив…';
     }
     await new Promise(r => setTimeout(r, 1500));
@@ -583,29 +595,24 @@ async function downloadSavedGame(id, name, statusEl, btnEl){
       // мероприятии без интернета.
       statusEl.textContent = `Внимание: ${built.failed} файл(ов) не удалось скачать из хранилища. Качаем архив…`;
     }
-    const resp = await fetch('/api/saved-games/'+encodeURIComponent(id)+'/download');
-    if(!resp.ok) throw new Error('Сервер ответил ошибкой ('+resp.status+')');
-    const total = +resp.headers.get('Content-Length') || 0;
-    const reader = resp.body.getReader();
-    const chunks = [];
-    let received = 0;
-    while(true){
-      const {done, value} = await reader.read();
-      if(done) break;
-      chunks.push(value);
-      received += value.length;
-      statusEl.textContent = total
-        ? `Скачивается: ${fmtBytes(received)} из ${fmtBytes(total)} (${Math.round(received/total*100)}%)`
-        : `Скачивается: ${fmtBytes(received)}`;
-    }
-    const blob = new Blob(chunks, {type:'application/zip'});
-    const url = URL.createObjectURL(blob);
-    const safeName = (name||'game').replace(/[\\/:*?"<>|]/g,'').trim() || 'game';
+    /* Дальше скачивание отдаём самому браузеру, а не тянем через fetch в
+       память вкладки. Раньше архив собирался в Blob целиком: для игры на 180
+       треков это сотни мегабайт в оперативке вкладки, причём поверх того, что
+       файл уже целиком лежит на диске сервера — двойной расход на пустом
+       месте, вплоть до падения вкладки на больших играх.
+
+       У браузера же есть собственный менеджер загрузок: он покажет и процент,
+       и оставшееся время, умеет продолжить прерванную закачку и пишет сразу
+       на диск. Имя файла придёт из Content-Disposition, оно там уже
+       выставлено правильно, с кириллицей. */
+    statusEl.textContent = `Архив готов${built.bytes ? ' — ' + fmtBytes(built.bytes) : ''}. Скачивание идёт в браузере (прогресс — в его загрузках).`;
+    // Ссылка с download, а не переход по location: если сервер вдруг ответит
+    // ошибкой (например, игру удалили между сборкой и скачиванием), страница
+    // игры останется на месте, а не уедет на JSON с текстом ошибки.
     const a = document.createElement('a');
-    a.href = url; a.download = safeName+'.zip';
+    a.href = '/api/saved-games/'+encodeURIComponent(id)+'/download';
+    a.download = ((name||'game').replace(/[\\/:*?"<>|]/g,'').trim() || 'game') + '.zip';
     document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(()=>URL.revokeObjectURL(url), 10000);
-    statusEl.textContent = 'Готово: '+fmtBytes(blob.size);
   }catch(e){
     statusEl.textContent = 'Ошибка скачивания: '+e.message;
   }finally{
