@@ -62,6 +62,13 @@
   .num.played .num-badge { position:absolute; top:.6vh; right:.7vw; font-size:1.1vh; font-weight:700; color:var(--dim); }
   .num.last { box-shadow:0 0 0 3px var(--accent), 0 0 40px rgba(255,46,99,.5); }
 
+  /* ---------- Мини-плеер (виден на сетке, пока трек не остановлен вручную) ---------- */
+  .miniplayer { display:none; padding:10px 20px; background:rgba(0,0,0,.45);
+                border-top:1px solid rgba(255,255,255,.08); align-items:center; gap:14px; flex-shrink:0; }
+  .miniplayer.on { display:flex; }
+  .miniplayer .mp-info { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+  .miniplayer .mp-info small { color:var(--past); font-weight:400; margin-left:8px; }
+
   /* ---------- Плеер ---------- */
   .stage { flex:1; min-height:0; display:grid;
            grid-template-columns:40% 60%; grid-template-rows:52% 48%; position:relative; }
@@ -146,6 +153,11 @@
     <button class="gh" id="btnFullG">⛶</button>
   </div>
   <div id="gridWrap"></div>
+  <div class="miniplayer" id="miniPlayer">
+    <div class="mp-info" id="miniInfo"></div>
+    <button class="sec" id="miniPlayPause">⏸</button>
+    <button class="gh" id="miniExpand">Открыть плеер</button>
+  </div>
 </div>
 
 <!-- ============ ПЛЕЕР ============ -->
@@ -220,6 +232,7 @@ window.GAME_DATA = /*__GAME_DATA__*/null;
   }));
   const tracks = GAME.tracks || {};
   let activeRoundIdx = 0;
+  let currentTrackId = null;   // что показывать в мини-плеере на экране сетки
 
   const $ = id => document.getElementById(id);
   const audio = $('audio');
@@ -327,6 +340,7 @@ window.GAME_DATA = /*__GAME_DATA__*/null;
   function openTrack(t, number){
     show('vPlay');
     lines=t.lines||[]; lastActive=-1;
+    currentTrackId = t.id || null;
     $('zTitle').textContent=t.title||''; $('zArtist').textContent=t.artist||'';
     $('zBadge').textContent = number?'№'+number:'';
     $('zonePhoto').innerHTML = t.photoFile ? `<img src="${t.photoFile}">` : '<div class="photo-ph">♪</div>';
@@ -343,7 +357,11 @@ window.GAME_DATA = /*__GAME_DATA__*/null;
       if(!r.played[number]){ r.played[number]=true; r.history.push(number); }
     }
   }
-  $('btnBack').onclick=()=>{ audio.pause(); $('btnPlay').textContent='▶'; show('vGrid'); renderGrid(); };
+  /* Уход к числам НЕ останавливает трек: ведущий объявляет номер, пока песня
+     играет, и глушить её на полуслове незачем. Раньше здесь стоял
+     audio.pause(), из-за чего оффлайн-версия вела себя не так, как онлайн:
+     там мини-плеер появился позже и в шаблон его не перенесли. */
+  $('btnBack').onclick=()=>{ show('vGrid'); renderGrid(); updateMiniPlayer(); };
   $('btnHook').onclick=()=>{ audio.currentTime=window.__hook||0; audio.play().catch(()=>{}); $('btnPlay').textContent='⏸'; };
   $('btnStart').onclick=()=>{ audio.currentTime=0; audio.play().catch(()=>{}); $('btnPlay').textContent='⏸'; };
   $('btnPlay').onclick=()=>{ if(audio.paused){audio.play().catch(()=>{});$('btnPlay').textContent='⏸';} else {audio.pause();$('btnPlay').textContent='▶';} };
@@ -355,6 +373,30 @@ window.GAME_DATA = /*__GAME_DATA__*/null;
     if(e.code==='KeyS') $('btnStart').click();
     if(e.code==='Space'){ e.preventDefault(); $('btnPlay').click(); }
   });
+
+  /* ---- Мини-плеер (на экране сетки) ----
+     Пока трек играет, на сетке снизу висит полоска с названием, паузой и
+     кнопкой вернуться в плеер. Без неё уход к числам означал бы, что музыку
+     нечем остановить, кроме как открыв трек заново. */
+  function updateMiniPlayer(){
+    const on = !!(currentTrackId && audio.src);
+    $('miniPlayer').classList.toggle('on', on);
+    if(!on) return;
+    $('miniInfo').textContent = $('zTitle').textContent;
+    $('miniPlayPause').textContent = audio.paused ? '▶ Продолжить' : '⏸ Пауза';
+  }
+  $('miniPlayPause').onclick=()=>{ if(audio.paused) audio.play().catch(()=>{}); else audio.pause(); };
+  $('miniExpand').onclick=()=>{ show('vPlay'); };
+
+  /* Подпись на кнопке плеера ведём от самих событий звука, а не выставляем
+     руками в каждом обработчике. Иначе пауза из мини-плеера оставляла бы в
+     большом плеере «⏸», хотя звук уже стоит. */
+  function syncPlayButtons(){
+    $('btnPlay').textContent = audio.paused ? '▶' : '⏸';
+    updateMiniPlayer();
+  }
+  audio.addEventListener('play', syncPlayButtons);
+  audio.addEventListener('pause', syncPlayButtons);
 
   /* ========== КАРАОКЕ ========== */
   function renderLines(){
