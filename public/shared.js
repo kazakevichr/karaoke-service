@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Общие мелкие утилиты для всех трёх страниц (/, /setup, /bank) — каждая
+   Общие мелкие утилиты для страниц сервиса (/, /setup, /bank, /admin) — каждая
    страница подключает этот файл первым тегом <script>. Специфичная для
    конкретной страницы логика (плеер, редактор трека, расстановка по числам
    и т.д.) живёт в собственном инлайн-скрипте каждой страницы, не здесь —
@@ -12,14 +12,42 @@ const escapeHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '
 const shuffleArr = arr => [...arr].sort(() => Math.random() - .5);
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
+/* Код этого браузера — случайная строка, которая живёт в его localStorage.
+   К нему сервер привязывает логин ведущего при первом входе: в другом
+   браузере или на другом компьютере тот же логин уже не пустят. */
+function mbDeviceId() {
+  let id = null;
+  try { id = localStorage.getItem('mb_device_id'); } catch (e) {}
+  if (!id) {
+    id = (crypto.randomUUID ? crypto.randomUUID() : uid() + uid());
+    try { localStorage.setItem('mb_device_id', id); } catch (e) {}
+  }
+  return id;
+}
+async function apiMe() {
+  const r = await fetch('/api/me');
+  return r.ok ? r.json() : { role: null };
+}
+/* Сессия кончилась или у ведущего вышел срок — уводим на страницу входа,
+   она объяснит, в чём дело. */
+function redirectOnAuthError(r) {
+  if (r.status === 401) location.href = '/login?next=' + encodeURIComponent(location.pathname);
+  else if (r.status === 403) location.href = '/login?expired=1';
+  else return false;
+  return true;
+}
+
 async function apiGetTracks() {
   const r = await fetch('/api/tracks');
-  if (!r.ok) throw new Error('Не удалось загрузить банк треков с сервера');
+  if (!r.ok) {
+    redirectOnAuthError(r);
+    throw new Error('Не удалось загрузить банк треков с сервера');
+  }
   return r.json();
 }
 async function apiGetSettings() {
   const r = await fetch('/api/settings');
-  if (!r.ok) return null;
+  if (!r.ok) { redirectOnAuthError(r); return null; }
   return r.json();
 }
 // Fire-and-forget, как и раньше — не блокируем интерфейс на каждое действие.

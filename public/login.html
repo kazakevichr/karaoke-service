@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Музыкальное лото — вход</title>
+<style>
+  :root { --bg:#0d0b1a; --bg2:#171332; --accent:#ff2e63; --accent2:#3b82f6;
+          --dim:#4a4868; --past:#8a87b8; --card:#1e1a3d; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; }
+  body { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px 16px;
+    background:radial-gradient(ellipse at 50% 0%, var(--bg2) 0%, var(--bg) 70%);
+    font-family:'Segoe UI',Arial,sans-serif; color:#fff; }
+  .box { width:100%; max-width:380px; background:#141030; border:1px solid rgba(255,255,255,.12);
+         border-radius:16px; padding:28px 24px; display:flex; flex-direction:column; gap:14px; }
+  h1 { margin:0; font-size:24px; }
+  p { margin:0; color:var(--past); font-size:14px; line-height:1.45; }
+  label { font-size:11px; color:var(--past); text-transform:uppercase; letter-spacing:.06em; display:block; margin-bottom:4px; }
+  input { width:100%; background:var(--card); border:1px solid rgba(255,255,255,.15); color:#fff;
+    padding:10px 12px; border-radius:8px; font-size:15px; font-family:inherit; }
+  button { background:linear-gradient(135deg,var(--accent),#ff5f8f); border:0; color:#fff;
+           padding:12px 16px; border-radius:8px; font-size:15px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .msg { font-size:14px; line-height:1.45; color:var(--accent); min-height:1em; }
+  .note { background:rgba(255,46,99,.1); border:1px solid rgba(255,46,99,.3); border-radius:10px;
+          padding:12px 14px; font-size:14px; line-height:1.45; display:none; }
+  a { color:#8fb6ff; }
+</style>
+</head>
+<body>
+<form class="box" id="form">
+  <h1>Музыкальное лото</h1>
+  <div class="note" id="note"></div>
+  <p>Логин и пароль выдаёт организатор.</p>
+  <div><label for="login">Логин</label><input id="login" autocomplete="username" autocapitalize="off" spellcheck="false" required></div>
+  <div><label for="password">Пароль</label><input id="password" type="password" autocomplete="current-password" required></div>
+  <button id="btn" type="submit">Войти</button>
+  <div class="msg" id="msg"></div>
+  <p style="font-size:13px">Игра уже сохранена на этом компьютере? <a href="/offline">Открыть без интернета</a></p>
+</form>
+
+<script src="/shared.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+// Куда вернуть после входа. Только пути этого же сайта — иначе ссылкой вида
+// /login?next=https://чужой-сайт можно было бы увести человека куда угодно.
+const next = /^\/(?!\/)/.test(params.get('next') || '') ? params.get('next') : null;
+
+if (params.get('expired')) {
+  // Текст причины знает сервер: срок кончился или доступ отключили.
+  fetch('/api/settings').then(r => r.status === 403 ? r.json() : null).then(d => {
+    if (!d || !d.error) return;
+    $('note').textContent = d.error;
+    $('note').style.display = 'block';
+  }).catch(() => {});
+}
+
+$('form').onsubmit = async e => {
+  e.preventDefault();
+  $('msg').textContent = '';
+  $('btn').disabled = true;
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ login: $('login').value.trim(), password: $('password').value, deviceId: mbDeviceId() }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || 'Не удалось войти');
+    location.href = next || (d.role === 'admin' ? '/bank' : '/');
+  } catch (err) {
+    $('msg').textContent = err.message;
+  } finally {
+    $('btn').disabled = false;
+  }
+};
+</script>
+</body>
+</html>

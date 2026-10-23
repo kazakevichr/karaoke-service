@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Музыкальное лото — ведущие</title>
+<style>
+  :root { --bg:#0d0b1a; --bg2:#171332; --accent:#ff2e63; --accent2:#3b82f6;
+          --dim:#4a4868; --past:#8a87b8; --card:#1e1a3d; --ok:#34d399; --warn:#ffb020; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; }
+  body { min-height:100vh; background:radial-gradient(ellipse at 50% 0%, var(--bg2) 0%, var(--bg) 70%);
+    font-family:'Segoe UI',Arial,sans-serif; color:#fff; }
+  .top { padding:12px 16px; background:rgba(0,0,0,.35); border-bottom:1px solid rgba(255,255,255,.08);
+         display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .top h1 { font-size:20px; margin:0; }
+  .top .sp { flex:1; }
+  main { max-width:980px; margin:0 auto; padding:20px 16px 60px; display:flex; flex-direction:column; gap:22px; }
+  section { background:#141030; border:1px solid rgba(255,255,255,.1); border-radius:14px; padding:18px; }
+  section h2 { font-size:17px; margin:0 0 12px; }
+  p.hint { color:var(--past); font-size:14px; line-height:1.5; margin:0 0 12px; }
+  label.f { font-size:11px; color:var(--past); text-transform:uppercase; letter-spacing:.06em; display:block; margin-bottom:4px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+  .fld { display:flex; flex-direction:column; }
+  input { background:var(--card); border:1px solid rgba(255,255,255,.15); color:#fff;
+    padding:8px 11px; border-radius:8px; font-size:14px; font-family:inherit; color-scheme:dark; }
+  button { background:linear-gradient(135deg,var(--accent),#ff5f8f); border:0; color:#fff;
+           padding:9px 14px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
+  button.sec { background:rgba(255,255,255,.1); }
+  button.gh { background:transparent; border:1px solid rgba(255,255,255,.2); }
+  button.sm { padding:6px 10px; font-size:13px; }
+  button:disabled { opacity:.45; cursor:default; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; }
+  .msg { font-size:14px; margin-top:10px; min-height:1em; color:var(--past); }
+  .msg.err { color:var(--accent); }
+
+  .creds { margin-top:14px; padding:14px; border-radius:10px; background:rgba(52,211,153,.08);
+           border:1px solid rgba(52,211,153,.35); display:none; }
+  .creds pre { margin:0 0 10px; font-family:inherit; font-size:15px; line-height:1.55; white-space:pre-wrap; }
+
+  .host { padding:14px 0; border-top:1px solid rgba(255,255,255,.08); display:flex; flex-direction:column; gap:10px; }
+  .host:first-child { border-top:0; padding-top:0; }
+  .host .head { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
+  .host .name { font-weight:700; font-size:16px; }
+  .host .login { color:var(--past); font-size:14px; }
+  .pill { font-size:12px; font-weight:700; padding:3px 9px; border-radius:20px; }
+  .pill.ok { background:rgba(52,211,153,.15); color:var(--ok); }
+  .pill.off { background:rgba(255,46,99,.15); color:var(--accent); }
+  .host .facts { color:var(--past); font-size:13px; line-height:1.5; }
+  .host .acts { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .host .acts .sep { width:1px; height:22px; background:rgba(255,255,255,.12); margin:0 4px; }
+  .empty { color:var(--past); font-size:14px; }
+
+  .st { font-size:14px; line-height:1.6; margin-bottom:12px; }
+  .st b.ok { color:var(--ok); } .st b.bad { color:var(--warn); }
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>Ведущие</h1>
+  <div class="sp"></div>
+  <button class="sec" onclick="location.href='/'">Игра</button>
+  <button class="sec" onclick="location.href='/bank'">Банк треков</button>
+  <button class="gh" id="btnLogout">Выйти</button>
+</div>
+
+<main>
+  <section>
+    <h2>Новый ведущий</h2>
+    <p class="hint">Ведущий входит на сайт своим логином, сам собирает игру из банка треков и играет —
+      онлайн или с сохранённой на компьютер копией без интернета. Логин работает только на одном
+      компьютере и только до выбранной даты включительно.</p>
+    <div class="row">
+      <div class="fld"><label class="f">Имя</label><input id="nName" placeholder="Иван Петров" style="width:200px"></div>
+      <div class="fld"><label class="f">Логин</label><input id="nLogin" placeholder="ivan" autocapitalize="off" spellcheck="false" style="width:150px"></div>
+      <div class="fld"><label class="f">Доступ до (включительно)</label><input type="date" id="nUntil"></div>
+      <div class="fld"><label class="f">&nbsp;</label>
+        <div class="chips">
+          <button class="sec sm" data-days="0">Только сегодня</button>
+          <button class="sec sm" data-days="2">3 дня</button>
+          <button class="sec sm" data-days="6">Неделя</button>
+          <button class="sec sm" data-days="29">Месяц</button>
+        </div>
+      </div>
+      <button id="btnCreate">Создать</button>
+    </div>
+    <div class="msg" id="createMsg"></div>
+    <div class="creds" id="creds">
+      <pre id="credsText"></pre>
+      <button class="sec sm" id="btnCopy">Скопировать для ведущего</button>
+      <span class="msg" id="copyMsg"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Все ведущие</h2>
+    <div id="hosts"><div class="empty">Загрузка…</div></div>
+  </section>
+
+  <section>
+    <h2>Файлы музыки в хранилище</h2>
+    <div class="st" id="storage">Проверяем…</div>
+    <button id="btnLock" style="display:none">Закрыть доступ к файлам</button>
+    <div class="msg" id="lockMsg"></div>
+  </section>
+</main>
+
+<script src="/shared.js"></script>
+<script>
+/* ---------- Даты: всё «по Москве», как и на сервере ---------- */
+const MSK = 3 * 3600 * 1000;
+const isoMsk = ms => new Date(ms + MSK).toISOString().slice(0, 10);
+const todayMsk = () => isoMsk(Date.now());
+function addDays(iso, n) { const d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+const ruDate = iso => iso.split('-').reverse().join('.');
+const ruWhen = ms => ms ? new Date(ms).toLocaleString('ru', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '—';
+
+async function api(method, url, body) {
+  const r = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  const d = await r.json().catch(() => ({}));
+  if (r.status === 401) { location.href = '/login?next=/admin'; throw new Error('Нужно войти'); }
+  if (!r.ok) throw new Error(d.error || 'Ошибка ' + r.status);
+  return d;
+}
+function say(id, text, err) { $(id).textContent = text; $(id).className = 'msg' + (err ? ' err' : ''); }
+
+/* ---------- Новый ведущий ---------- */
+const TR = { а:'a',б:'b',в:'v',г:'g',д:'d',е:'e',ё:'e',ж:'zh',з:'z',и:'i',й:'y',к:'k',л:'l',м:'m',н:'n',о:'o',п:'p',
+  р:'r',с:'s',т:'t',у:'u',ф:'f',х:'h',ц:'c',ч:'ch',ш:'sh',щ:'sch',ъ:'',ы:'y',ь:'',э:'e',ю:'yu',я:'ya' };
+let loginTouched = false;
+$('nLogin').oninput = () => { loginTouched = true; };
+// Логин по умолчанию — имя латиницей: так его проще продиктовать.
+$('nName').oninput = () => {
+  if (loginTouched) return;
+  const first = $('nName').value.trim().toLowerCase().split(/\s+/)[0] || '';
+  $('nLogin').value = [...first].map(c => TR[c] !== undefined ? TR[c] : c).join('').replace(/[^a-z0-9._-]/g, '');
+};
+$('nUntil').value = todayMsk();
+document.querySelectorAll('[data-days]').forEach(b => {
+  b.onclick = () => { $('nUntil').value = addDays(todayMsk(), +b.dataset.days); };
+});
+
+function credsText(host, password) {
+  return `Музыкальное лото\nСайт: ${location.origin}/login\nЛогин: ${host.login}\nПароль: ${password}\nДоступ до ${host.accessUntilText} включительно\n\nВойти можно только с одного компьютера — того, где войдёте первый раз.`;
+}
+function showCreds(host, password) {
+  $('credsText').textContent = credsText(host, password);
+  $('creds').style.display = 'block';
+  say('copyMsg', '');
+  $('creds').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+$('btnCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText($('credsText').textContent); say('copyMsg', 'Скопировано'); }
+  catch (e) { say('copyMsg', 'Не получилось скопировать — выделите текст вручную', true); }
+};
+
+$('btnCreate').onclick = async () => {
+  say('createMsg', '');
+  $('btnCreate').disabled = true;
+  try {
+    const d = await api('POST', '/api/hosts', { name: $('nName').value, login: $('nLogin').value, accessUntil: $('nUntil').value });
+    showCreds(d.host, d.password);
+    $('nName').value = ''; $('nLogin').value = ''; loginTouched = false;
+    loadHosts();
+  } catch (e) { say('createMsg', e.message, true); }
+  finally { $('btnCreate').disabled = false; }
+};
+
+/* ---------- Список ведущих ---------- */
+async function loadHosts() {
+  const box = $('hosts');
+  let list;
+  try { list = await api('GET', '/api/hosts'); }
+  catch (e) { box.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; return; }
+  if (!list.length) { box.innerHTML = '<div class="empty">Пока никого нет.</div>'; return; }
+  box.innerHTML = '';
+  list.forEach(h => box.appendChild(hostRow(h)));
+}
+
+function hostRow(h) {
+  const el = document.createElement('div');
+  el.className = 'host';
+  const status = !h.enabled ? '<span class="pill off">Отключён</span>'
+    : h.active ? `<span class="pill ok">Работает до ${escapeHtml(h.accessUntilText)}</span>`
+    : `<span class="pill off">Закончился ${escapeHtml(h.accessUntilText)}</span>`;
+  el.innerHTML = `
+    <div class="head"><span class="name">${escapeHtml(h.name)}</span><span class="login">логин ${escapeHtml(h.login)}</span>${status}</div>
+    <div class="facts">
+      Компьютер: ${h.deviceBound ? 'привязан ' + ruWhen(h.deviceBoundAt) : 'ещё не входил'} ·
+      последний раз на сайте: ${ruWhen(h.lastSeenAt)} · сохранённых игр: ${h.gamesCount}
+    </div>
+    <div class="acts">
+      <button class="sec sm" data-ext="1">+1 день</button>
+      <button class="sec sm" data-ext="3">+3 дня</button>
+      <button class="sec sm" data-ext="7">+неделя</button>
+      <button class="sec sm" data-ext="30">+месяц</button>
+      <input type="date" data-date value="${h.accessUntil ? isoMsk(h.accessUntil) : ''}">
+      <button class="sec sm" data-setdate>Поставить дату</button>
+      <span class="sep"></span>
+      <button class="gh sm" data-unbind ${h.deviceBound ? '' : 'disabled'}>Отвязать компьютер</button>
+      <button class="gh sm" data-pass>Новый пароль</button>
+      <button class="gh sm" data-toggle>${h.enabled ? 'Отключить' : 'Включить'}</button>
+      <button class="gh sm" data-del>Удалить</button>
+    </div>
+    <div class="msg" data-msg></div>`;
+  const msg = (t, err) => { const m = el.querySelector('[data-msg]'); m.textContent = t; m.className = 'msg' + (err ? ' err' : ''); };
+  async function patch(body, okText) {
+    try {
+      const d = await api('PATCH', '/api/hosts/' + encodeURIComponent(h.id), body);
+      const fresh = hostRow(d.host);
+      el.replaceWith(fresh);
+      if (d.password) showCreds(d.host, d.password);
+      fresh.querySelector('[data-msg]').textContent = okText(d.host);
+    } catch (e) { msg(e.message, true); }
+  }
+  // Продление считаем от более поздней из двух дат: сегодня или текущий конец
+  // доступа. Иначе «+неделя» действующему ведущему съела бы остаток срока.
+  el.querySelectorAll('[data-ext]').forEach(b => {
+    b.onclick = () => {
+      const base = h.active ? isoMsk(h.accessUntil) : addDays(todayMsk(), -1);
+      const until = addDays(base, +b.dataset.ext);
+      patch({ accessUntil: until, enabled: true }, x => `Доступ до ${x.accessUntilText} включительно`);
+    };
+  });
+  el.querySelector('[data-setdate]').onclick = () => {
+    const v = el.querySelector('[data-date]').value;
+    if (!v) return msg('Выберите дату', true);
+    patch({ accessUntil: v }, x => `Доступ до ${x.accessUntilText} включительно`);
+  };
+  el.querySelector('[data-unbind]').onclick = () => {
+    if (!confirm(`Отвязать компьютер ведущего ${h.name}? Он сможет войти с другого компьютера — и тот станет новым. Сохранённые на старом компьютере игры перестанут продлеваться.`)) return;
+    patch({ resetDevice: true }, () => 'Компьютер отвязан — следующий вход привяжет новый');
+  };
+  el.querySelector('[data-pass]').onclick = () => {
+    if (!confirm(`Выдать ${h.name} новый пароль? Старый перестанет работать сразу.`)) return;
+    patch({ resetPassword: true }, () => 'Новый пароль — в карточке выше, отправьте его ведущему');
+  };
+  el.querySelector('[data-toggle]').onclick = () => {
+    if (h.enabled && !confirm(`Отключить ${h.name}? На сайт он больше не войдёт, а сохранённые на компьютере игры доработают не дольше трёх дней.`)) return;
+    patch({ enabled: !h.enabled }, x => x.enabled ? 'Включён' : 'Отключён');
+  };
+  el.querySelector('[data-del]').onclick = async () => {
+    if (!confirm(`Удалить ${h.name} совсем? Его сохранённые игры на сайте удалятся тоже.`)) return;
+    try { await api('DELETE', '/api/hosts/' + encodeURIComponent(h.id)); el.remove(); }
+    catch (e) { msg(e.message, true); }
+  };
+  return el;
+}
+
+/* ---------- Хранилище ---------- */
+let lockPoll = null;
+async function loadStorage() {
+  let s;
+  try { s = await api('GET', '/api/storage'); }
+  catch (e) { $('storage').textContent = e.message; return; }
+  if (!s.enabled) { $('storage').textContent = 'Хранилище не настроено на сервере.'; return; }
+
+  const lines = [];
+  lines.push(s.publicReadable === false
+    ? '<b class="ok">Файлы закрыты.</b> Открываются только по временной ссылке, которую сайт выдаёт вошедшим.'
+    : '<b class="bad">Файлы открыты.</b> Любой, у кого есть ссылка на файл, может его скачать.');
+  lines.push(s.corsOk
+    ? '<b class="ok">Сохранение игры на компьютер идёт напрямую из хранилища</b> — быстро.'
+    : '<b class="bad">Сохранение игры на компьютер идёт через сервер</b> — медленно. Кнопка ниже это исправит.');
+  if (s.locked && s.publicReadable) lines.push('<b class="bad">Файлы закрыты, но хранилище всё равно отдаёт их всем.</b> Скорее всего, сам бакет открыт целиком — в панели хранилища переключите его на «приватный».');
+  if (s.urlMode !== 'signed') lines.push('<b class="bad">Хранилище не принимает временные ссылки</b> — закрывать файлы сейчас нельзя, иначе музыка перестанет играть.');
+  $('storage').innerHTML = lines.join('<br>');
+
+  const job = s.job;
+  const running = job && job.state === 'running';
+  $('btnLock').style.display = (s.publicReadable !== false || !s.corsOk || running) && s.urlMode === 'signed' ? '' : 'none';
+  $('btnLock').disabled = running;
+  if (job) {
+    const step = { cors: 'настраиваем скачивание', acl: `закрываем файлы: ${job.done} из ${job.total}`, zips: 'удаляем старые архивы игр' }[job.step];
+    if (running) say('lockMsg', 'Идёт: ' + step + '…');
+    else if (job.state === 'error') say('lockMsg', 'Ошибка: ' + job.error, true);
+    else say('lockMsg', `Готово: закрыто файлов — ${job.done - job.missing - job.failed}`
+      + (job.failed ? `, не закрылось — ${job.failed}` : '')
+      + `; старых архивов удалено — ${job.zipsDeleted}`
+      + (job.cors === 'ok' ? '' : `. Скачивание напрямую не настроилось: ${job.cors}`), !!job.failed || job.cors !== 'ok');
+  }
+  clearTimeout(lockPoll);
+  if (running) lockPoll = setTimeout(loadStorage, 2000);
+}
+$('btnLock').onclick = async () => {
+  if (!confirm('Закрыть файлы музыки? После этого их можно будет открыть только через сайт. Старые ZIP-архивы игр удалятся из хранилища и с сервера — архивы, которые уже скачаны на компьютеры, продолжат работать.')) return;
+  try { await api('POST', '/api/storage/lock'); loadStorage(); }
+  catch (e) { say('lockMsg', e.message, true); }
+};
+
+$('btnLogout').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); location.href = '/login'; };
+loadHosts();
+loadStorage();
+</script>
+</body>
+</html>

@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Музыкальное лото — игра</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
 <style>
   :root { --bg:#0d0b1a; --bg2:#171332; --accent:#ff2e63; --accent2:#3b82f6;
           --dim:#4a4868; --past:#8a87b8; --card:#1e1a3d; }
@@ -128,7 +130,10 @@
     <button class="sec" id="btnSavedGames">Сохранённые игры</button>
     <div class="sp"></div>
     <span class="status" id="gStatus"></span>
+    <span class="status" id="whoAmI"></span>
     <button class="sec" id="btnToSetup">⚙ Настройка</button>
+    <button class="gh" id="btnOffline" title="Игры, сохранённые на этом компьютере">Без интернета</button>
+    <button class="gh" id="btnLogout">Выйти</button>
     <button class="gh" id="btnFullG">⛶</button>
   </div>
   <div id="gridWrap"></div>
@@ -211,12 +216,14 @@
   </div>
 </div>
 
-<!-- ============ СОХРАНЁННЫЕ ИГРЫ (для оффлайн-скачивания) ============ -->
+<!-- ============ СОХРАНЁННЫЕ ИГРЫ ============ -->
 <div class="sync" id="savedGamesView">
   <h3>Сохранённые игры</h3>
   <p>Каждая сохранённая игра — отдельный именованный снимок текущей раскладки раундов (какие треки на
-     каких числах, тексты и тайминги) — не зависит от того, что случится с банком треков потом. Скачанный
-     архив открывается двойным кликом по HTML-файлу внутри, полностью без интернета.</p>
+     каких числах, тексты и тайминги) — не зависит от того, что случится с банком треков потом.
+     «Сохранить на этот компьютер» скачивает игру внутрь браузера, и дальше она играется без интернета
+     на странице «Без интернета». Делайте это заранее, пока интернет хороший: игра на 180 треков —
+     около гигабайта.</p>
   <div class="sync-list" id="savedGamesList"></div>
   <div class="sync-actions">
     <span class="status" id="savedGamesStatus"></span>
@@ -228,6 +235,8 @@
 <audio id="audio"></audio>
 
 <script src="/shared.js"></script>
+<script src="/license-key.js"></script>
+<script src="/offline-store.js"></script>
 <script>
 /* ========== Данные с сервера ========== */
 let bank = [];
@@ -299,6 +308,8 @@ $('btnRandom').onclick = () => {
   say('gStatus',`Выпало число ${n}`);
 };
 $('btnToSetup').onclick = () => { location.href = '/setup'; };
+$('btnOffline').onclick = () => { location.href = '/offline'; };
+$('btnLogout').onclick = async () => { await fetch('/api/logout', { method:'POST' }); location.href = '/login'; };
 function toggleFull(){ if(!document.fullscreenElement) document.documentElement.requestFullscreen(); else document.exitFullscreen(); }
 $('btnFullG').onclick=toggleFull; $('btnFullP').onclick=toggleFull;
 
@@ -527,7 +538,7 @@ function downloadTrackList(id){
   window.location.href = `/api/saved-games/${encodeURIComponent(id)}/tracklist?download=1`;
 }
 
-/* ========== СОХРАНЁННЫЕ ИГРЫ (для оффлайн-скачивания) ========== */
+/* ========== СОХРАНЁННЫЕ ИГРЫ ========== */
 async function apiListSavedGames(){ const r=await fetch('/api/saved-games'); if(!r.ok) return []; return r.json(); }
 async function apiSaveGame(name){
   const r=await fetch('/api/saved-games', { method:'POST', headers:{'Content-Type':'application/json'},
@@ -537,96 +548,27 @@ async function apiSaveGame(name){
 }
 async function apiDeleteSavedGame(id){ await fetch('/api/saved-games/'+encodeURIComponent(id), { method:'DELETE' }); }
 function fmtBytes(n){
-  if(!n) return '';
+  if(!n) return '0 МБ';
   if(n<1024*1024) return (n/1024).toFixed(0)+' КБ';
-  return (n/1024/1024).toFixed(1)+' МБ';
+  return (n/1024/1024).toFixed(0)+' МБ';
 }
-/* Сборка архива идёт на сервере фоном, здесь мы её только ждём, коротко
-   спрашивая статус. Раньше это был один длинный запрос на всё время сборки:
-   на большой игре он молчал минутами, обратный прокси рвал соединение, и
-   надпись «Готовим архив…» оставалась навсегда — ответа уже никто не слал.
-   Опрос переживает такие обрывы: сборка на сервере продолжается сама по себе,
-   а мы просто спрашиваем ещё раз. */
-/* Оценка остатка по средней скорости с начала сборки. Намеренно грубая и
-   округлённая: точность тут никому не нужна, нужен ответ на вопрос «это
-   секунды или полчаса», чтобы ожидание не выглядело зависанием. Пока сделано
-   меньше трёх файлов, средняя ещё бессмысленна — молчим. */
-function fmtEta(t0, done, total){
-  if(done < 3 || done >= total) return '';
-  const left = Math.round((Date.now() - t0) / done * (total - done) / 1000);
-  if(left < 10) return '';
-  if(left < 90) return ` · осталось ~${left} с`;
-  return ` · осталось ~${Math.round(left / 60)} мин`;
-}
-async function waitForZip(id, statusEl){
-  let lastDone = -1, first = true;
-  const t0 = Date.now();
-  while(true){
-    const r = await fetch('/api/saved-games/'+encodeURIComponent(id)+'/prepare', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      // Повторить упавшую сборку просим только первым запросом — то есть по
-      // нажатию кнопки. Дальше это просто опрос прогресса.
-      body: JSON.stringify({ retry: first }),
-    });
-    first = false;
-    if(!r.ok) throw new Error('Сервер ответил ошибкой ('+r.status+')');
-    const st = await r.json();
-
-    if(st.state === 'ready') return st;
-    if(st.state === 'error') throw new Error(st.error || 'сборка архива не удалась');
-
-    if(st.state === 'uploading'){
-      // Отдельный этап: архив собран и переезжает в хранилище, откуда его
-      // потом заберёт браузер напрямую. Без этой надписи выглядело бы как
-      // повторное зависание на «180 из 180».
-      statusEl.textContent = st.bytes
-        ? `Архив собран, переносим в хранилище: ${fmtBytes(st.uploaded||0)} из ${fmtBytes(st.bytes)} (${Math.round((st.uploaded||0)/st.bytes*100)}%)`
-        : 'Архив собран, переносим в хранилище…';
-    } else if(st.done !== lastDone){
-      lastDone = st.done;
-      statusEl.textContent = st.total
-        ? `Готовим архив: ${st.done} из ${st.total} файлов${fmtEta(t0, st.done, st.total)}${st.bytes ? ' · ' + fmtBytes(st.bytes) : ''}`
-        : 'Готовим архив…';
-    }
-    await new Promise(r => setTimeout(r, 1500));
-  }
-}
-async function downloadSavedGame(id, name, statusEl, btnEl){
+/* Сохранение игры на этот компьютер — для работы без интернета. Файлы
+   качаются прямо в браузер (offline-store.js), архива и папки не
+   появляется. Уже скачанное повторно не качается, поэтому повторное
+   нажатие просто докачивает то, что не скачалось. */
+async function saveGameToComputer(id, statusEl, btnEl){
   btnEl.disabled = true;
-  statusEl.textContent = 'Готовим архив…';
+  statusEl.textContent = 'Готовим…';
   try{
-    const built = await waitForZip(id, statusEl);
-    if(built.failed){
-      // Не молчим про недокачанные файлы: архив собран, но часть треков в нём
-      // будет без аудио или обложки, и узнать об этом лучше сейчас, а не на
-      // мероприятии без интернета.
-      statusEl.textContent = `Внимание: ${built.failed} файл(ов) не удалось скачать из хранилища. Качаем архив…`;
-    }
-    /* Дальше скачивание отдаём самому браузеру, а не тянем через fetch в
-       память вкладки. Раньше архив собирался в Blob целиком: для игры на 180
-       треков это сотни мегабайт в оперативке вкладки, причём поверх того, что
-       файл уже целиком лежит на диске сервера — двойной расход на пустом
-       месте, вплоть до падения вкладки на больших играх.
-
-       У браузера же есть собственный менеджер загрузок: он покажет и процент,
-       и оставшееся время, умеет продолжить прерванную закачку и пишет сразу
-       на диск. Имя файла придёт из Content-Disposition, оно там уже
-       выставлено правильно, с кириллицей. */
-    /* Качаем прямо из хранилища, если архив туда доехал. Через сам сервер
-       приложения такой файл идёт со скоростью около 60 КБ/с — почти гигабайт
-       растянулся бы на часы. Хранилище отдаёт быстро: на нём и так работает
-       всё аудио в онлайн-игре. Запасной путь через сервер остаётся на случай,
-       если выгрузка не удалась. */
-    statusEl.textContent = `Архив готов${built.bytes ? ' — ' + fmtBytes(built.bytes) : ''}. Скачивание идёт в браузере (прогресс — в его загрузках).`;
-    // Ссылка с download, а не переход по location: если сервер вдруг ответит
-    // ошибкой (например, игру удалили между сборкой и скачиванием), страница
-    // игры останется на месте, а не уедет на JSON с текстом ошибки.
-    const a = document.createElement('a');
-    a.href = built.url || ('/api/saved-games/'+encodeURIComponent(id)+'/download');
-    a.download = ((name||'game').replace(/[\\/:*?"<>|]/g,'').trim() || 'game') + '.zip';
-    document.body.appendChild(a); a.click(); a.remove();
+    const res = await MBOffline.saveGame(id, p => {
+      statusEl.textContent = `Сохраняем на компьютер: ${p.done} из ${p.total} файлов · ${fmtBytes(p.bytes)}`
+        + (p.failed ? ` · не скачалось: ${p.failed}` : '');
+    });
+    statusEl.innerHTML = res.failed
+      ? `<span style="color:#ffb020">Сохранена, но ${res.failed} файл(ов) не скачались — нажмите «Сохранить» ещё раз, докачаются только они.</span>`
+      : '✓ Сохранена на этом компьютере. Играть без интернета — кнопка «Без интернета» вверху.';
   }catch(e){
-    statusEl.textContent = 'Ошибка скачивания: '+e.message;
+    statusEl.textContent = 'Не получилось: '+e.message;
   }finally{
     btnEl.disabled = false;
   }
@@ -636,7 +578,7 @@ $('btnSaveGame').onclick = async () => {
   if(!name || !name.trim()) return;
   try{
     await apiSaveGame(name.trim());
-    say('gStatus', `Игра «${name.trim()}» сохранена — скачать можно в разделе «Сохранённые игры»`);
+    say('gStatus', `Игра «${name.trim()}» сохранена — она в разделе «Сохранённые игры»`);
   }catch(e){ say('gStatus', e.message, true); }
 };
 async function renderSavedGames(){
@@ -644,6 +586,7 @@ async function renderSavedGames(){
   let list=[];
   try{ list=await apiListSavedGames(); }
   catch(e){ box.innerHTML='<div style="color:#ff2e63;padding:10px">Не удалось загрузить список</div>'; return; }
+  const onComputer = new Set((await MBOffline.listGames().catch(()=>[])).map(g=>g.id));
   box.innerHTML='';
   if(!list.length){
     box.innerHTML='<div style="color:#4a4868;padding:10px">Пока нет ни одной сохранённой игры. Нажмите «Сохранить игру».</div>';
@@ -652,17 +595,17 @@ async function renderSavedGames(){
   list.forEach(g=>{
     const row=document.createElement('div'); row.className='sg-row';
     row.innerHTML=`<div class="tt">${escapeHtml(g.name)}<small>${new Date(g.createdAt).toLocaleString('ru')} · ${g.roundsCount} раунд(ов) · ${g.trackCount} треков</small>
-        <small data-dl-status style="display:block"></small></div>
+        <small data-dl-status style="display:block">${onComputer.has(g.id)?'✓ Сохранена на этом компьютере':''}</small></div>
       <button class="sec" data-list title="Блок, номер, название, исполнитель + проверка на повторы">Список треков</button>
-      <button class="sec" data-dl>Скачать игру</button>
+      <button class="sec" data-dl>Сохранить на этот компьютер</button>
       <button class="gh" data-del>Удалить</button>`;
     const dlBtn=row.querySelector('[data-dl]'), dlStatus=row.querySelector('[data-dl-status]');
-    dlBtn.onclick=()=>downloadSavedGame(g.id, g.name, dlStatus, dlBtn);
+    dlBtn.onclick=()=>saveGameToComputer(g.id, dlStatus, dlBtn);
     // Здесь — «посмотреть»: список открывается соседней вкладкой прямо в
     // браузере. Кнопка «скачать .txt файлом» живёт в модалке бланков.
     row.querySelector('[data-list]').onclick=()=>openTrackList(g.id);
     row.querySelector('[data-del]').onclick=async()=>{
-      if(!confirm(`Удалить сохранённую игру «${g.name}»? Уже скачанные ранее архивы не пострадают.`)) return;
+      if(!confirm(`Удалить сохранённую игру «${g.name}»? На компьютерах, где она уже сохранена для игры без интернета, она останется — убрать её оттуда можно на странице «Без интернета».`)) return;
       await apiDeleteSavedGame(g.id);
       renderSavedGames();
     };
@@ -673,6 +616,10 @@ $('btnSavedGames').onclick=()=>{ $('savedGamesView').classList.add('on'); render
 $('btnSavedGamesClose').onclick=()=>$('savedGamesView').classList.remove('on');
 
 /* ========== СТАРТ ========== */
+if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+apiMe().then(me=>{
+  if(me.role==='host') $('whoAmI').textContent = `${me.name} · доступ до ${me.accessUntilText}`;
+});
 (async function init(){
   try{ bank=await apiGetTracks(); }catch(e){ console.error(e); bank=[]; }
   try{

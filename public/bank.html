@@ -159,6 +159,7 @@
     <div class="sp"></div>
     <span class="status" id="lStatus"></span>
     <button class="sec" id="btnToSetup">К настройке</button>
+    <button class="sec" id="btnToAdmin">Ведущие</button>
     <button class="gh" id="btnLogout">Выйти</button>
   </div>
   <div class="libwrap">
@@ -387,6 +388,7 @@ function fillLibCatFilter(){
   el.value=[...el.options].some(o=>o.value===cur)?cur:'';
 }
 $('btnToSetup').onclick = () => { location.href='/setup'; };
+$('btnToAdmin').onclick = () => { location.href='/admin'; };
 
 /* ========== БАНК ТРЕКОВ ========== */
 let libSortMode='alpha';

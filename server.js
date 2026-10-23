@@ -11,14 +11,20 @@ const fsp = require('fs/promises');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const Database = require('better-sqlite3');
-const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
-const { Upload } = require('@aws-sdk/lib-storage');
-const archiver = require('archiver');
+const {
+  S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand,
+  PutObjectAclCommand, GetBucketCorsCommand, PutBucketCorsCommand, ListObjectsV2Command,
+  HeadObjectCommand, CopyObjectCommand,
+} = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { buildTrackListText } = require('./lib/tracklist');
 const { streamBlanksPdf, MAX_PLAYERS } = require('./lib/blanks-pdf');
-const { ensureBuild: ensureZipBuild, forgetJob: forgetZipJob } = require('./lib/offline-zip');
 
 const app = express();
+// Сервис стоит за обратным прокси Coolify: без этого req.ip — адрес прокси
+// (ограничение попыток входа считало бы всех одним человеком), а req.secure
+// всегда false.
+app.set('trust proxy', true);
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 
@@ -34,60 +40,6 @@ const uploadTrackFile = multer({
 });
 
 /* ==========================================================================
-   Авторизация банка треков — один общий пароль (ADMIN_PASSWORD), без отдельных
-   логинов на пользователя. Страница игры и настройка раунда остаются полностью
-   открытыми; закрыт только сам банк (страница /bank и API его редактирования:
-   создание/удаление трека, загрузка аудио/фото, поиск на Spotify/YouTube,
-   поиск текста, авто/ручной синхрон). Чтение списка треков (GET /api/tracks)
-   и раунды (/api/settings) остаются публичными — иначе страница игры не
-   смогла бы ни проигрывать треки, ни сохранять отметки сыгранного.
-   Сессия — простой случайный токен в httpOnly-cookie, список валидных токенов
-   держим в памяти процесса (без БД/JWT — этого достаточно для одного общего
-   пароля). При перезапуске сервера все уже вошедшие разлогиниваются — это
-   нормально, не проблема для такого масштаба использования.
-   ========================================================================== */
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const SESSION_COOKIE = 'bank_session';
-const validSessions = new Set();
-
-function parseCookies(req) {
-  const header = req.headers.cookie;
-  const out = {};
-  if (!header) return out;
-  header.split(';').forEach(part => {
-    const idx = part.indexOf('=');
-    if (idx < 0) return;
-    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
-  });
-  return out;
-}
-function requireAuth(req, res, next) {
-  const token = parseCookies(req)[SESSION_COOKIE];
-  if (token && validSessions.has(token)) return next();
-  res.status(401).json({ error: 'Нужен вход в банк треков' });
-}
-
-app.post('/api/login', (req, res) => {
-  if (!ADMIN_PASSWORD) return res.status(500).json({ error: 'ADMIN_PASSWORD не задан на сервере — вход в банк не настроен' });
-  const password = (req.body || {}).password || '';
-  if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Неверный пароль' });
-  const token = crypto.randomBytes(24).toString('hex');
-  validSessions.add(token);
-  res.cookie(SESSION_COOKIE, token, {
-    httpOnly: true, sameSite: 'lax', maxAge: 30 * 24 * 3600 * 1000,
-    secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
-  });
-  res.json({ ok: true });
-});
-app.post('/api/logout', (req, res) => {
-  const token = parseCookies(req)[SESSION_COOKIE];
-  if (token) validSessions.delete(token);
-  res.clearCookie(SESSION_COOKIE);
-  res.json({ ok: true });
-});
-app.get('/api/auth-check', requireAuth, (req, res) => res.json({ ok: true }));
-
-/* ==========================================================================
    Общий банк треков и раунды — теперь на сервере, а не в IndexedDB/localStorage
    браузера, чтобы с сервисом можно было работать с любого устройства.
    Метаданные (название/исполнитель/текст/тайминги/раунды) — в SQLite-файле
@@ -98,12 +50,10 @@ app.get('/api/auth-check', requireAuth, (req, res) => res.json({ ok: true }));
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'karaoke.db');
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
-// Кэш готовых ZIP-архивов офлайн-игр — на том же персистентном томе, что и БД
-// (см. DB_PATH выше), чтобы не терялся при передеплое. Сохранённая игра —
-// неизменный снимок, поэтому один раз собранный архив можно смело отдавать
-// повторно вместо пересборки с нуля на каждое скачивание.
-const ZIP_CACHE_DIR = path.join(path.dirname(DB_PATH), 'zip-cache');
-fs.mkdirSync(ZIP_CACHE_DIR, { recursive: true });
+// Сюда раньше складывались собранные ZIP-архивы игр. Архивы больше не
+// выдаются (вместо них — игра без интернета прямо в браузере ведущего), а
+// папку подчищает «Закрыть доступ к файлам» на странице /admin.
+const LEGACY_ZIP_CACHE_DIR = path.join(path.dirname(DB_PATH), 'zip-cache');
 db.pragma('journal_mode = WAL');
 db.exec(`
   CREATE TABLE IF NOT EXISTS tracks (
@@ -131,8 +81,394 @@ db.exec(`
     createdAt INTEGER,
     data TEXT NOT NULL
   );
+  -- Раунды ведущих. У администратора они по-прежнему в settings (id = 1),
+  -- у каждого ведущего — своя строка здесь, owner = 'host:<id>'.
+  CREATE TABLE IF NOT EXISTS owner_settings (
+    owner TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS hosts (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    login TEXT NOT NULL UNIQUE,
+    passHash TEXT NOT NULL,
+    accessUntil INTEGER,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    deviceId TEXT,
+    deviceBoundAt INTEGER,
+    lastSeenAt INTEGER,
+    createdAt INTEGER
+  );
+  CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    role TEXT NOT NULL,
+    hostId TEXT,
+    deviceId TEXT,
+    createdAt INTEGER,
+    expiresAt INTEGER
+  );
+  CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
 `);
+// Сохранённые игры теперь у каждого свои: старые записи остаются за
+// администратором.
+if (!db.prepare('PRAGMA table_info(saved_games)').all().some(c => c.name === 'owner')) {
+  db.exec("ALTER TABLE saved_games ADD COLUMN owner TEXT NOT NULL DEFAULT 'admin'");
+}
+const getState = key => {
+  const row = db.prepare('SELECT value FROM app_state WHERE key = ?').get(key);
+  return row ? row.value : null;
+};
+const setState = (key, value) => db.prepare(
+  'INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+).run(key, String(value));
 
+/* ==========================================================================
+   Вход и доступ.
+
+   Роли две. Администратор входит общим паролем ADMIN_PASSWORD, как и раньше:
+   ему банк треков, ведущие и хранилище. Ведущий входит своим логином и
+   паролем, которые выдаёт администратор на странице /admin, и работает до
+   даты, которую тот поставил. Ведущий собирает свои игры из общего банка и
+   играет в них онлайн или без интернета; сам банк ему не виден.
+
+   Логин ведущего привязывается к первому браузеру, в котором в него вошли
+   (код браузера — случайная строка в его localStorage). Отдать логин
+   коллеге бесполезно: на чужом компьютере вход не пройдёт, пока
+   администратор не отвяжет старый.
+
+   Сессии лежат в базе, а не в памяти процесса: иначе каждый перезапуск
+   сервера выкидывал бы всех ведущих из кабинета.
+   ========================================================================== */
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+const SESSION_COOKIE = 'bank_session';
+const DAY_MS = 24 * 3600 * 1000;
+const SESSION_TTL_MS = 30 * DAY_MS;
+
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  const out = {};
+  if (!header) return out;
+  header.split(';').forEach(part => {
+    const idx = part.indexOf('=');
+    if (idx < 0) return;
+    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  });
+  return out;
+}
+
+function safeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  return `${salt.toString('hex')}:${crypto.scryptSync(password, salt, 32).toString('hex')}`;
+}
+function checkPassword(password, stored) {
+  const [saltHex, hashHex] = String(stored || '').split(':');
+  if (!saltHex || !hashHex) return false;
+  const hash = crypto.scryptSync(String(password), Buffer.from(saltHex, 'hex'), 32);
+  return crypto.timingSafeEqual(hash, Buffer.from(hashHex, 'hex'));
+}
+// Без похожих друг на друга символов (l/1, o/0): пароль ведущему обычно
+// пересылают в мессенджере или диктуют по телефону.
+function generatePassword() {
+  const abc = 'abcdefghjkmnpqrstuvwxyz23456789';
+  return Array.from(crypto.randomBytes(8), b => abc[b % abc.length]).join('');
+}
+
+/* Срок доступа — «до такого-то числа включительно» по Москве. Храним момент
+   конца этого дня, а показываем дату. Часовой пояс зашит: и ведущие, и
+   мероприятия здесь, а сервер живёт в UTC. */
+const MSK_OFFSET_MS = 3 * 3600 * 1000;
+function endOfDayMsk(dateStr) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateStr || ''))) return null;
+  const t = Date.parse(`${dateStr}T23:59:59.999+03:00`);
+  return Number.isFinite(t) ? t : null;
+}
+function fmtDateMsk(ms) {
+  const d = new Date(ms + MSK_OFFSET_MS);
+  return `${String(d.getUTCDate()).padStart(2, '0')}.${String(d.getUTCMonth() + 1).padStart(2, '0')}.${d.getUTCFullYear()}`;
+}
+const hostActive = (h, now = Date.now()) => !!(h && h.enabled && h.accessUntil && h.accessUntil > now);
+function accessEndedText(h) {
+  if (!h.enabled) return 'Доступ отключён организатором.';
+  if (!h.accessUntil) return 'Доступ ещё не открыт — напишите организатору.';
+  return `Доступ закончился ${fmtDateMsk(h.accessUntil)}. Чтобы продлить, напишите организатору.`;
+}
+const DEVICE_MISMATCH_TEXT = 'Этот логин уже работает на другом компьютере или в другом браузере. Попросите организатора отвязать старый.';
+
+function startSession(req, res, role, hostId, deviceId) {
+  const token = crypto.randomBytes(24).toString('hex');
+  const now = Date.now();
+  db.prepare('INSERT INTO sessions (token, role, hostId, deviceId, createdAt, expiresAt) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(token, role, hostId || null, deviceId || null, now, now + SESSION_TTL_MS);
+  db.prepare('DELETE FROM sessions WHERE expiresAt < ?').run(now);
+  res.cookie(SESSION_COOKIE, token, { httpOnly: true, sameSite: 'lax', maxAge: SESSION_TTL_MS, secure: req.secure });
+}
+
+function currentUser(req) {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (!token) return null;
+  const s = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
+  if (!s || s.expiresAt < Date.now()) return null;
+  if (s.role === 'admin') return { role: 'admin', owner: 'admin', name: 'Администратор' };
+  const host = db.prepare('SELECT * FROM hosts WHERE id = ?').get(s.hostId);
+  if (!host) return null;
+  return { role: 'host', owner: 'host:' + host.id, name: host.name, host, active: hostActive(host) };
+}
+
+// Когда ведущий заходил последний раз — видно на странице /admin. Пишем не
+// на каждый запрос, а не чаще раза в пять минут.
+function touchHost(host) {
+  const now = Date.now();
+  if (!host.lastSeenAt || now - host.lastSeenAt > 5 * 60 * 1000) {
+    db.prepare('UPDATE hosts SET lastSeenAt = ? WHERE id = ?').run(now, host.id);
+  }
+}
+
+function requireAdmin(req, res, next) {
+  const u = currentUser(req);
+  if (u && u.role === 'admin') { req.user = u; return next(); }
+  res.status(401).json({ error: 'Нужен вход администратора', code: 'login_required' });
+}
+// Игра и настройка раунда: администратор или ведущий с действующим сроком.
+function requirePlayer(req, res, next) {
+  const u = currentUser(req);
+  if (!u) return res.status(401).json({ error: 'Нужно войти', code: 'login_required' });
+  if (u.role === 'host') {
+    if (!u.active) return res.status(403).json({ error: accessEndedText(u.host), code: 'access_expired' });
+    touchHost(u.host);
+  }
+  req.user = u;
+  next();
+}
+
+// Подбор пароля: не больше 10 неудачных попыток с одного адреса за 15 минут.
+const loginFails = new Map();
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+function loginBlocked(ip) {
+  const f = loginFails.get(ip);
+  if (!f || Date.now() - f.since > LOGIN_WINDOW_MS) { loginFails.delete(ip); return false; }
+  return f.n >= 10;
+}
+function noteLoginFail(ip) {
+  const f = loginFails.get(ip);
+  if (!f || Date.now() - f.since > LOGIN_WINDOW_MS) loginFails.set(ip, { n: 1, since: Date.now() });
+  else f.n++;
+}
+
+/* Вход. Без логина или с логином admin — пароль администратора (так
+   по-прежнему входит форма на странице банка), иначе — ведущий. */
+app.post('/api/login', (req, res) => {
+  if (loginBlocked(req.ip)) return res.status(429).json({ error: 'Слишком много неудачных попыток. Подождите 15 минут.' });
+  const b = req.body || {};
+  const login = String(b.login || '').trim().toLowerCase();
+  const password = String(b.password || '');
+
+  if (!login || login === 'admin') {
+    if (!ADMIN_PASSWORD) return res.status(500).json({ error: 'ADMIN_PASSWORD не задан на сервере — вход администратора не настроен' });
+    if (!safeEqual(password, ADMIN_PASSWORD)) { noteLoginFail(req.ip); return res.status(401).json({ error: 'Неверный пароль' }); }
+    startSession(req, res, 'admin');
+    return res.json({ ok: true, role: 'admin' });
+  }
+
+  const host = db.prepare('SELECT * FROM hosts WHERE login = ?').get(login);
+  if (!host || !checkPassword(password, host.passHash)) {
+    noteLoginFail(req.ip);
+    return res.status(401).json({ error: 'Неверный логин или пароль' });
+  }
+  if (!hostActive(host)) return res.status(403).json({ error: accessEndedText(host), code: 'access_expired' });
+  const deviceId = String(b.deviceId || '').slice(0, 64);
+  if (!deviceId) return res.status(400).json({ error: 'Браузер не передал код компьютера — обновите страницу и попробуйте ещё раз' });
+  if (host.deviceId && host.deviceId !== deviceId) {
+    return res.status(403).json({ error: DEVICE_MISMATCH_TEXT, code: 'device_mismatch' });
+  }
+  if (!host.deviceId) db.prepare('UPDATE hosts SET deviceId = ?, deviceBoundAt = ? WHERE id = ?').run(deviceId, Date.now(), host.id);
+  startSession(req, res, 'host', host.id, deviceId);
+  touchHost(host);
+  res.json({ ok: true, role: 'host' });
+});
+app.post('/api/logout', (req, res) => {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (token) db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  res.clearCookie(SESSION_COOKIE);
+  res.json({ ok: true });
+});
+app.get('/api/auth-check', requireAdmin, (req, res) => res.json({ ok: true }));
+app.get('/api/me', (req, res) => {
+  const u = currentUser(req);
+  if (!u) return res.json({ role: null });
+  if (u.role === 'admin') return res.json({ role: 'admin', name: u.name });
+  res.json({
+    role: 'host', name: u.host.name, active: u.active,
+    accessUntil: u.host.accessUntil, accessUntilText: u.host.accessUntil ? fmtDateMsk(u.host.accessUntil) : '',
+  });
+});
+
+/* ==========================================================================
+   Лицензия для игры без интернета.
+
+   Сохранённая в браузере игра запускается без сервера, поэтому решать,
+   можно ли играть, приходится самой странице /offline. Решает она по
+   лицензии: сервер выдаёт её, пока у ведущего есть доступ, и подписывает
+   своим ключом. В лицензии — до какого момента разрешено играть без связи:
+   три дня от выдачи, но не дольше срока доступа. Пока интернет есть,
+   страница обновляет лицензию сама, так что ведущий трёхдневного предела
+   обычно и не замечает. Подпись не даёт просто переписать дату в
+   хранилище браузера: проверяется открытым ключом, который страница
+   получает вместе с собой (/license-key.js).
+
+   Закрытый ключ лежит рядом с базой, на постоянном томе, и создаётся при
+   первом запуске. Если он потеряется, старые лицензии перестанут
+   проходить проверку — страница просто запросит новые, как только
+   появится интернет.
+   ========================================================================== */
+const OFFLINE_GRACE_MS = 3 * DAY_MS;
+const LICENSE_KEY_PATH = path.join(path.dirname(DB_PATH), 'license-key.pem');
+function loadLicenseKey() {
+  try {
+    return crypto.createPrivateKey(fs.readFileSync(LICENSE_KEY_PATH));
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw e;
+    const { privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    fs.writeFileSync(LICENSE_KEY_PATH, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+    return privateKey;
+  }
+}
+const licenseKey = loadLicenseKey();
+const licensePublicJwk = crypto.createPublicKey(licenseKey).export({ format: 'jwk' });
+// Формат подписи ieee-p1363 — тот, что понимает WebCrypto в браузере
+// (по умолчанию Node подписывает в DER, и браузер такую подпись отверг бы).
+function signLicense(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.sign('sha256', Buffer.from(body), { key: licenseKey, dsaEncoding: 'ieee-p1363' });
+  return `${body}.${sig.toString('base64url')}`;
+}
+
+app.get('/api/license', requirePlayer, (req, res) => {
+  const u = req.user;
+  const now = Date.now();
+  const deviceId = String(req.get('x-device-id') || '').slice(0, 64);
+  if (u.role === 'host' && u.host.deviceId && u.host.deviceId !== deviceId) {
+    return res.status(403).json({ error: DEVICE_MISMATCH_TEXT, code: 'device_mismatch' });
+  }
+  const accessUntil = u.role === 'host' ? u.host.accessUntil : null;
+  const payload = {
+    v: 1, sub: u.owner, name: u.name, device: deviceId, iat: now,
+    accessUntil, offlineUntil: accessUntil ? Math.min(now + OFFLINE_GRACE_MS, accessUntil) : now + OFFLINE_GRACE_MS,
+  };
+  res.json({ token: signLicense(payload), payload });
+});
+app.get('/license-key.js', (req, res) => {
+  res.type('application/javascript');
+  res.set('Cache-Control', 'no-cache');
+  res.send(`window.MB_LICENSE_KEY = ${JSON.stringify(licensePublicJwk)};\n`);
+});
+
+/* ==========================================================================
+   Ведущие — управление на странице /admin.
+   ========================================================================== */
+function hostView(h, gamesCount) {
+  return {
+    id: h.id, name: h.name, login: h.login, enabled: !!h.enabled, active: hostActive(h),
+    accessUntil: h.accessUntil, accessUntilText: h.accessUntil ? fmtDateMsk(h.accessUntil) : '',
+    deviceBound: !!h.deviceId, deviceBoundAt: h.deviceBoundAt, lastSeenAt: h.lastSeenAt,
+    createdAt: h.createdAt, gamesCount: gamesCount || 0,
+  };
+}
+const normLogin = s => String(s || '').trim().toLowerCase();
+const LOGIN_RE = /^[a-z0-9._-]{3,32}$/;
+
+app.get('/api/hosts', requireAdmin, (req, res) => {
+  const counts = {};
+  db.prepare("SELECT owner, COUNT(*) n FROM saved_games WHERE owner LIKE 'host:%' GROUP BY owner").all()
+    .forEach(r => { counts[r.owner] = r.n; });
+  const rows = db.prepare('SELECT * FROM hosts ORDER BY createdAt DESC').all();
+  res.json(rows.map(h => hostView(h, counts['host:' + h.id])));
+});
+
+app.post('/api/hosts', requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const name = String(b.name || '').trim();
+  const login = normLogin(b.login);
+  const accessUntil = endOfDayMsk(b.accessUntil);
+  if (!name) return res.status(400).json({ error: 'Укажите имя ведущего' });
+  if (!LOGIN_RE.test(login)) return res.status(400).json({ error: 'Логин — от 3 до 32 латинских букв, цифр, точек, дефисов' });
+  if (login === 'admin') return res.status(400).json({ error: 'Логин admin занят администратором' });
+  if (!accessUntil) return res.status(400).json({ error: 'Укажите, до какого числа открыт доступ' });
+  if (db.prepare('SELECT 1 FROM hosts WHERE login = ?').get(login)) return res.status(400).json({ error: 'Такой логин уже есть' });
+  const id = 'h' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
+  const password = generatePassword();
+  db.prepare(`INSERT INTO hosts (id, name, login, passHash, accessUntil, enabled, createdAt)
+              VALUES (?, ?, ?, ?, ?, 1, ?)`).run(id, name, login, hashPassword(password), accessUntil, Date.now());
+  res.json({ host: hostView(db.prepare('SELECT * FROM hosts WHERE id = ?').get(id)), password });
+});
+
+app.patch('/api/hosts/:id', requireAdmin, (req, res) => {
+  const host = db.prepare('SELECT * FROM hosts WHERE id = ?').get(req.params.id);
+  if (!host) return res.status(404).json({ error: 'Ведущий не найден' });
+  const b = req.body || {};
+  let password = null;
+  // Отвязка, новый пароль и отключение выкидывают ведущего из уже открытых
+  // сессий: иначе старый компьютер продолжал бы работать до конца сессии.
+  let dropSessions = false;
+  if (b.name !== undefined) {
+    const name = String(b.name).trim();
+    if (!name) return res.status(400).json({ error: 'Имя не может быть пустым' });
+    db.prepare('UPDATE hosts SET name = ? WHERE id = ?').run(name, host.id);
+  }
+  if (b.accessUntil !== undefined) {
+    const t = endOfDayMsk(b.accessUntil);
+    if (!t) return res.status(400).json({ error: 'Неверная дата' });
+    db.prepare('UPDATE hosts SET accessUntil = ? WHERE id = ?').run(t, host.id);
+  }
+  if (b.enabled !== undefined) {
+    db.prepare('UPDATE hosts SET enabled = ? WHERE id = ?').run(b.enabled ? 1 : 0, host.id);
+    if (!b.enabled) dropSessions = true;
+  }
+  if (b.resetDevice) {
+    db.prepare('UPDATE hosts SET deviceId = NULL, deviceBoundAt = NULL WHERE id = ?').run(host.id);
+    dropSessions = true;
+  }
+  if (b.resetPassword) {
+    password = generatePassword();
+    db.prepare('UPDATE hosts SET passHash = ? WHERE id = ?').run(hashPassword(password), host.id);
+    dropSessions = true;
+  }
+  if (dropSessions) db.prepare('DELETE FROM sessions WHERE hostId = ?').run(host.id);
+  res.json({ host: hostView(db.prepare('SELECT * FROM hosts WHERE id = ?').get(host.id)), password });
+});
+
+app.delete('/api/hosts/:id', requireAdmin, (req, res) => {
+  const id = req.params.id;
+  const owner = 'host:' + id;
+  db.transaction(() => {
+    db.prepare('DELETE FROM sessions WHERE hostId = ?').run(id);
+    db.prepare('DELETE FROM owner_settings WHERE owner = ?').run(owner);
+    db.prepare('DELETE FROM saved_games WHERE owner = ?').run(owner);
+    db.prepare('DELETE FROM hosts WHERE id = ?').run(id);
+  })();
+  res.json({ ok: true });
+});
+
+/* ==========================================================================
+   Хранилище (S3).
+
+   Раньше каждый файл лежал в открытом доступе по постоянной ссылке, а список
+   треков со ссылками отдавался всем подряд: скачать весь банк мог кто
+   угодно. Теперь ссылки временные (подписанные, живут 12 часов — с запасом
+   на вечер игры) и выдаются только вошедшим. Сами файлы закрываются одной
+   кнопкой на странице /admin — см. runStorageLock ниже.
+
+   Подписанные ссылки сервер проверяет на старте: если хранилище их вдруг не
+   примет, музыка перестала бы играть совсем, поэтому в таком случае
+   временно отдаём прямые ссылки и пишем об этом в лог.
+   ========================================================================== */
 const s3Enabled = !!(process.env.S3_ENDPOINT && process.env.S3_BUCKET && process.env.S3_ACCESS_KEY && process.env.S3_SECRET_KEY);
 const s3 = s3Enabled ? new S3Client({
   endpoint: process.env.S3_ENDPOINT,
@@ -149,10 +485,46 @@ function s3PublicUrl(key) {
   if (S3_PUBLIC_BASE) return `${S3_PUBLIC_BASE}/${key}`;
   return `${(process.env.S3_ENDPOINT || '').replace(/\/$/, '')}/${process.env.S3_BUCKET}/${key}`;
 }
+
+const SIGNED_URL_TTL_S = 12 * 3600;
+let s3UrlMode = 'signed'; // 'public' — запасной режим, пока хранилище не принимает подписанные ссылки
+// Одну и ту же подписанную ссылку отдаём полсрока: так браузер может взять
+// файл из своего кэша, а не качать заново на каждой перезагрузке страницы.
+const signedUrlCache = new Map();
+async function s3Url(key) {
+  if (!key) return null;
+  if (!s3Enabled || s3UrlMode !== 'signed') return s3PublicUrl(key);
+  const now = Date.now();
+  const hit = signedUrlCache.get(key);
+  if (hit && hit.exp - now > SIGNED_URL_TTL_S * 1000 / 2) return hit.url;
+  const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: key }), { expiresIn: SIGNED_URL_TTL_S });
+  signedUrlCache.set(key, { url, exp: now + SIGNED_URL_TTL_S * 1000 });
+  return url;
+}
+async function checkSignedUrls() {
+  if (!s3Enabled) return;
+  const row = db.prepare('SELECT audioKey FROM tracks WHERE audioKey IS NOT NULL LIMIT 1').get();
+  if (!row) return;
+  try {
+    const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: row.audioKey }), { expiresIn: 60 });
+    const r = await fetch(url, { headers: { Range: 'bytes=0-0' } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    if (s3UrlMode !== 'signed') console.log('[s3] подписанные ссылки снова работают');
+    s3UrlMode = 'signed';
+  } catch (e) {
+    s3UrlMode = 'public';
+    console.warn(`[s3] хранилище не приняло подписанную ссылку (${e.message}) — отдаю прямые ссылки, проверю снова через 5 минут`);
+    setTimeout(checkSignedUrls, 5 * 60 * 1000);
+  }
+}
+checkSignedUrls();
+
+const storageLocked = () => getState('storageLocked') === '1';
 async function s3Upload(key, buffer, contentType) {
   await s3.send(new PutObjectCommand({
     Bucket: process.env.S3_BUCKET, Key: key, Body: buffer,
-    ContentType: contentType || 'application/octet-stream', ACL: 'public-read',
+    ContentType: contentType || 'application/octet-stream',
+    ACL: storageLocked() ? 'private' : 'public-read',
   }));
 }
 async function s3Delete(key) {
@@ -160,26 +532,201 @@ async function s3Delete(key) {
   try { await s3.send(new DeleteObjectCommand({ Bucket: process.env.S3_BUCKET, Key: key })); }
   catch (e) { console.warn('Не удалось удалить объект из S3:', key, e.message); }
 }
-function rowToTrack(row) {
+
+// Откуда страницы сервиса ходят в хранилище за файлами. Нужно для правила
+// CORS: без него браузер не даст странице скачать аудио себе для игры без
+// интернета (просто проиграть файл он даёт и так).
+function appOrigins(req) {
+  const list = (process.env.APP_ORIGINS || 'https://muzbingo.dobro-inc.com,https://muzbingo.dobro-inc.ru')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  const own = req.get('origin') || `${req.protocol}://${req.get('host')}`;
+  if (own && !list.includes(own)) list.push(own);
+  return list;
+}
+
+async function runWithLimit(items, limit, fn) {
+  let i = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length) await fn(items[i++]);
+  });
+  await Promise.all(workers);
+}
+
+/* «Закрыть доступ к файлам» на странице /admin. Три шага:
+   1) правило CORS, чтобы страницы сервиса могли скачивать файлы для игры
+      без интернета;
+   2) все аудио и обложки банка становятся закрытыми — открываются только
+      по временной ссылке от сервера;
+   3) удаляются старые ZIP-архивы игр — и в хранилище, и на диске сервера.
+   Файлов сотни, поэтому идёт фоном, а страница спрашивает прогресс. */
+let lockJob = null;
+async function runStorageLock(origins) {
+  const bucket = process.env.S3_BUCKET;
+  const job = lockJob = { state: 'running', step: 'cors', done: 0, total: 0, missing: 0, failed: 0, zipsDeleted: 0, cors: null, error: null };
+  try {
+    try {
+      let rules = [];
+      try { rules = (await s3.send(new GetBucketCorsCommand({ Bucket: bucket }))).CORSRules || []; }
+      catch (e) { if (!/NoSuchCORS/i.test(e.name || '')) throw e; }
+      const ours = {
+        ID: 'muzbingo', AllowedOrigins: origins, AllowedMethods: ['GET', 'HEAD'], AllowedHeaders: ['*'],
+        ExposeHeaders: ['Content-Length', 'Content-Range', 'Accept-Ranges', 'ETag'], MaxAgeSeconds: 3600,
+      };
+      await s3.send(new PutBucketCorsCommand({
+        Bucket: bucket, CORSConfiguration: { CORSRules: [...rules.filter(r => r.ID !== 'muzbingo'), ours] },
+      }));
+      job.cors = 'ok';
+    } catch (e) {
+      job.cors = e.message || String(e);
+      console.warn('[storage-lock] CORS не настроен:', e);
+    }
+
+    job.step = 'acl';
+    const keys = new Set();
+    db.prepare('SELECT audioKey, photoKey FROM tracks').all().forEach(r => {
+      if (r.audioKey) keys.add(r.audioKey);
+      if (r.photoKey) keys.add(r.photoKey);
+    });
+    db.prepare('SELECT data FROM saved_games').all().forEach(r => {
+      Object.values(JSON.parse(r.data).tracks || {}).forEach(t => {
+        if (t.audioKey) keys.add(t.audioKey);
+        if (t.photoKey) keys.add(t.photoKey);
+      });
+    });
+    job.total = keys.size;
+    const isMissing = e => e.name === 'NoSuchKey' || e.name === 'NotFound' || (e.$metadata && e.$metadata.httpStatusCode === 404);
+    // Не каждое S3-совместимое хранилище умеет менять права у готового
+    // файла. Тогда файл копируется сам в себя уже закрытым — результат тот
+    // же, только тип файла надо передать заново, иначе он потеряется.
+    // Есть ли файл на самом деле, решает HeadObject: на незнакомую команду
+    // некоторые хранилища тоже отвечают 404.
+    async function makePrivate(key) {
+      try {
+        await s3.send(new PutObjectAclCommand({ Bucket: bucket, Key: key, ACL: 'private' }));
+        return;
+      } catch (e) { /* пробуем копией ниже */ }
+      const head = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+      await s3.send(new CopyObjectCommand({
+        Bucket: bucket, Key: key, CopySource: `${bucket}/${key.split('/').map(encodeURIComponent).join('/')}`,
+        ACL: 'private', MetadataDirective: 'REPLACE', ContentType: head.ContentType,
+      }));
+    }
+    await runWithLimit([...keys], 6, async key => {
+      try { await makePrivate(key); }
+      catch (e) {
+        if (isMissing(e)) job.missing++;
+        else { job.failed++; console.warn('[storage-lock] не закрылся', key, e.message); }
+      }
+      job.done++;
+    });
+    if (!job.failed) {
+      setState('storageLocked', '1');
+      setState('storageLockedAt', Date.now());
+    }
+
+    job.step = 'zips';
+    let token;
+    do {
+      const r = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: 'offline-games/', ContinuationToken: token }));
+      for (const o of r.Contents || []) { await s3Delete(o.Key); job.zipsDeleted++; }
+      token = r.IsTruncated ? r.NextContinuationToken : undefined;
+    } while (token);
+    await fsp.rm(LEGACY_ZIP_CACHE_DIR, { recursive: true, force: true });
+    job.state = 'done';
+  } catch (e) {
+    console.error('[storage-lock]', e);
+    job.state = 'error';
+    job.error = e.message || String(e);
+  }
+}
+
+// Проба одного файла банка: открыт ли он без ссылки от сервера и отдаёт ли
+// хранилище заголовки CORS для страниц сервиса.
+async function probeStorage(origin) {
+  const row = db.prepare('SELECT audioKey FROM tracks WHERE audioKey IS NOT NULL LIMIT 1').get();
+  if (!s3Enabled || !row) return {};
+  const out = {};
+  try { out.publicReadable = (await fetch(s3PublicUrl(row.audioKey), { headers: { Range: 'bytes=0-0' } })).ok; }
+  catch (e) { out.publicReadable = null; }
+  if (s3UrlMode === 'signed') {
+    try {
+      const r = await fetch(await s3Url(row.audioKey), { headers: { Range: 'bytes=0-0', Origin: origin } });
+      out.signedOk = r.ok;
+      out.corsOk = !!r.headers.get('access-control-allow-origin');
+    } catch (e) { out.signedOk = false; }
+  }
+  return out;
+}
+
+app.get('/api/storage', requireAdmin, async (req, res) => {
+  try {
+    const probe = await probeStorage(appOrigins(req)[0]);
+    res.json({
+      enabled: s3Enabled, urlMode: s3UrlMode, locked: storageLocked(),
+      lockedAt: +getState('storageLockedAt') || null, job: lockJob, ...probe,
+    });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+app.post('/api/storage/lock', requireAdmin, (req, res) => {
+  if (!s3Enabled) return res.status(400).json({ error: 'Хранилище не настроено' });
+  if (s3UrlMode !== 'signed') {
+    return res.status(400).json({ error: 'Хранилище сейчас не принимает временные ссылки — если закрыть файлы, музыка перестанет играть. Закрывать нельзя, смотрите лог сервера.' });
+  }
+  if (!(lockJob && lockJob.state === 'running')) runStorageLock(appOrigins(req));
+  res.json({ ok: true, job: lockJob });
+});
+
+async function rowToTrack(row, withMedia = true) {
   return {
     id: row.id, title: row.title, artist: row.artist, album: row.album,
     hook: row.hook, lyrics: row.lyrics,
     lines: JSON.parse(row.lines || '[]'),
     syncPct: row.syncPct,
     categories: JSON.parse(row.categories || '[]'),
-    audioUrl: s3PublicUrl(row.audioKey),
-    photoUrl: s3PublicUrl(row.photoKey),
+    audioUrl: withMedia ? await s3Url(row.audioKey) : null,
+    photoUrl: withMedia ? await s3Url(row.photoKey) : null,
     createdAt: row.createdAt,
   };
 }
 
-/* ---- API: общий банк треков ---- */
-app.get('/api/tracks', (req, res) => {
-  const rows = db.prepare('SELECT * FROM tracks ORDER BY createdAt DESC').all();
-  res.json(rows.map(rowToTrack));
+/* ---- API: настройки (категории, раунды) ----
+   У администратора — общий документ в settings, как раньше. У ведущего —
+   свой, в owner_settings. Категории у всех одни — те, что заведены в банке
+   треков; ведущий их не меняет. */
+function freshRound() { return { category: '', size: 30, map: {}, played: {}, history: [], blanks: null }; }
+function adminSettings() {
+  const row = db.prepare('SELECT data FROM settings WHERE id = 1').get();
+  return row ? JSON.parse(row.data) : null;
+}
+function bankCategories() {
+  const s = adminSettings();
+  return s && Array.isArray(s.categories) && s.categories.length ? s.categories : ['Общая'];
+}
+function loadOwnerSettings(user) {
+  if (user.role === 'admin') return adminSettings();
+  const row = db.prepare('SELECT data FROM owner_settings WHERE owner = ?').get(user.owner);
+  const s = row ? JSON.parse(row.data) : { activeRound: 0, rounds: [freshRound(), freshRound(), freshRound()] };
+  s.categories = bankCategories();
+  return s;
+}
+
+/* ---- API: общий банк треков ----
+   Ведущему ссылки на аудио и обложки выдаём только для треков из его
+   текущих раундов: играть ему нужны только они, а весь банк целиком ему
+   ни к чему. */
+app.get('/api/tracks', requirePlayer, async (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM tracks ORDER BY createdAt DESC').all();
+    let withMedia = null;
+    if (req.user.role === 'host') {
+      withMedia = new Set();
+      (loadOwnerSettings(req.user).rounds || []).forEach(r => Object.values(r.map || {}).forEach(id => { if (id) withMedia.add(id); }));
+    }
+    res.json(await Promise.all(rows.map(r => rowToTrack(r, !withMedia || withMedia.has(r.id)))));
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/tracks/:id', requireAuth, (req, res) => {
+app.put('/api/tracks/:id', requireAdmin, async (req, res) => {
   try {
     const id = req.params.id;
     const b = req.body || {};
@@ -200,11 +747,11 @@ app.put('/api/tracks/:id', requireAuth, (req, res) => {
       audioType: existing ? existing.audioType : null,
       createdAt,
     });
-    res.json(rowToTrack(db.prepare('SELECT * FROM tracks WHERE id = ?').get(id)));
+    res.json(await rowToTrack(db.prepare('SELECT * FROM tracks WHERE id = ?').get(id)));
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/tracks/:id/audio', requireAuth, (req, res) => {
+app.post('/api/tracks/:id/audio', requireAdmin, (req, res) => {
   uploadTrackFile.single('audio')(req, res, async (uploadErr) => {
     if (uploadErr) {
       const code = uploadErr.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
@@ -221,12 +768,12 @@ app.post('/api/tracks/:id/audio', requireAuth, (req, res) => {
       await s3Upload(key, req.file.buffer, req.file.mimetype);
       if (existing.audioKey && existing.audioKey !== key) await s3Delete(existing.audioKey);
       db.prepare('UPDATE tracks SET audioKey = ?, audioType = ? WHERE id = ?').run(key, req.file.mimetype, id);
-      res.json({ url: s3PublicUrl(key) });
+      res.json({ url: await s3Url(key) });
     } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
   });
 });
 
-app.post('/api/tracks/:id/photo', requireAuth, (req, res) => {
+app.post('/api/tracks/:id/photo', requireAdmin, (req, res) => {
   uploadTrackFile.single('photo')(req, res, async (uploadErr) => {
     if (uploadErr) return res.status(400).json({ error: 'Ошибка загрузки файла: ' + uploadErr.message });
     try {
@@ -238,7 +785,7 @@ app.post('/api/tracks/:id/photo', requireAuth, (req, res) => {
       const key = `photo/${id}.jpg`;
       await s3Upload(key, req.file.buffer, req.file.mimetype || 'image/jpeg');
       db.prepare('UPDATE tracks SET photoKey = ? WHERE id = ?').run(key, id);
-      res.json({ url: s3PublicUrl(key) });
+      res.json({ url: await s3Url(key) });
     } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
   });
 });
@@ -250,7 +797,7 @@ app.post('/api/tracks/:id/photo', requireAuth, (req, res) => {
 // из браузера напрямую на S3 упирается в отсутствие CORS-заголовков у
 // бакета, поэтому байты забираем здесь, на сервере (CORS — чисто браузерное
 // ограничение, серверных запросов оно не касается).
-app.get('/api/tracks/:id/audio-file', requireAuth, async (req, res) => {
+app.get('/api/tracks/:id/audio-file', requireAdmin, async (req, res) => {
   try {
     if (!s3Enabled) return res.status(500).json({ error: 'S3 не настроен на сервере' });
     const row = db.prepare('SELECT audioKey, audioType FROM tracks WHERE id = ?').get(req.params.id);
@@ -261,7 +808,7 @@ app.get('/api/tracks/:id/audio-file', requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.delete('/api/tracks/:id', requireAuth, async (req, res) => {
+app.delete('/api/tracks/:id', requireAdmin, async (req, res) => {
   try {
     const id = req.params.id;
     const existing = db.prepare('SELECT * FROM tracks WHERE id = ?').get(id);
@@ -274,37 +821,46 @@ app.delete('/api/tracks/:id', requireAuth, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-/* ---- API: настройки (категории, раунды) — один общий JSON-документ ---- */
-app.get('/api/settings', (req, res) => {
-  const row = db.prepare('SELECT data FROM settings WHERE id = 1').get();
-  res.json(row ? JSON.parse(row.data) : null);
+app.get('/api/settings', requirePlayer, (req, res) => {
+  res.json(loadOwnerSettings(req.user));
 });
-app.put('/api/settings', (req, res) => {
+app.put('/api/settings', requirePlayer, (req, res) => {
   try {
-    db.prepare(`
-      INSERT INTO settings (id, data) VALUES (1, ?)
-      ON CONFLICT(id) DO UPDATE SET data = excluded.data
-    `).run(JSON.stringify(req.body || {}));
+    if (req.user.role === 'admin') {
+      db.prepare(`
+        INSERT INTO settings (id, data) VALUES (1, ?)
+        ON CONFLICT(id) DO UPDATE SET data = excluded.data
+      `).run(JSON.stringify(req.body || {}));
+    } else {
+      const { categories, ...own } = req.body || {};
+      db.prepare(`
+        INSERT INTO owner_settings (owner, data) VALUES (?, ?)
+        ON CONFLICT(owner) DO UPDATE SET data = excluded.data
+      `).run(req.user.owner, JSON.stringify(own));
+    }
     res.json({ ok: true });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-/* ---- API: сохранённые игры (для оффлайн-скачивания) ----
+/* ---- API: сохранённые игры ----
    "Сохранить игру" фиксирует текущую раскладку треков по числам в раундах как
    отдельный именованный снимок в базе — независимо от того, что случится с
    общим банком треков потом. Снимок хранит копию метаданных нужных треков
    (название/исполнитель/текст/тайминги), поэтому текст и синхронизация не
    пострадают, даже если исходный трек потом отредактируют или удалят из банка.
    Сами аудиофайлы в снимке НЕ дублируются в S3 (остаётся только ссылка-ключ) —
-   если трек удалят из банка позже, его аудио пропадёт из архива при скачивании
-   (сознательный компромисс, см. обсуждение ТЗ). */
-app.post('/api/saved-games', (req, res) => {
+   если трек удалят из банка позже, его аудио пропадёт и из игры.
+
+   У каждого свои сохранённые игры: ведущий видит только собственные. */
+const ownGame = (req, id) => db.prepare('SELECT * FROM saved_games WHERE id = ? AND owner = ?').get(id, req.user.owner);
+
+app.post('/api/saved-games', requirePlayer, (req, res) => {
   try {
     const { name, rounds } = req.body || {};
     if (!name || !name.trim()) return res.status(400).json({ error: 'Укажите название игры' });
     if (!Array.isArray(rounds)) return res.status(400).json({ error: 'Нет данных раундов' });
 
-    // Раунды без единого расставленного трека в снимок не берём — офлайн-игре
+    // Раунды без единого расставленного трека в снимок не берём — игре
     // от них всё равно никакой пользы, только пустая вкладка.
     const nonEmptyRounds = rounds.filter(r => r.map && Object.values(r.map).some(Boolean));
     if (!nonEmptyRounds.length) {
@@ -332,15 +888,15 @@ app.post('/api/saved-games', (req, res) => {
       tracks: tracksSnapshot,
     };
     const createdAt = Date.now();
-    db.prepare('INSERT INTO saved_games (id, name, createdAt, data) VALUES (?, ?, ?, ?)')
-      .run(id, name.trim(), createdAt, JSON.stringify(data));
+    db.prepare('INSERT INTO saved_games (id, name, createdAt, data, owner) VALUES (?, ?, ?, ?, ?)')
+      .run(id, name.trim(), createdAt, JSON.stringify(data), req.user.owner);
     res.json({ id, name: name.trim(), createdAt });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/saved-games', (req, res) => {
+app.get('/api/saved-games', requirePlayer, (req, res) => {
   try {
-    const rows = db.prepare('SELECT id, name, createdAt, data FROM saved_games ORDER BY createdAt DESC').all();
+    const rows = db.prepare('SELECT id, name, createdAt, data FROM saved_games WHERE owner = ? ORDER BY createdAt DESC').all(req.user.owner);
     res.json(rows.map(r => {
       const data = JSON.parse(r.data);
       const nonEmpty = (data.rounds || []).filter(rr => Object.keys(rr.map || {}).length);
@@ -355,19 +911,52 @@ app.get('/api/saved-games', (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.delete('/api/saved-games/:id', (req, res) => {
+app.delete('/api/saved-games/:id', requirePlayer, (req, res) => {
   try {
-    db.prepare('DELETE FROM saved_games WHERE id = ?').run(req.params.id);
-    // Подчищаем закэшированный архив, если он был собран (см. ZIP_CACHE_DIR) —
-    // иначе он останется на диске бесполезным мусором.
-    fs.unlink(path.join(ZIP_CACHE_DIR, `${req.params.id}.zip`), () => {});
-    fs.unlink(path.join(ZIP_CACHE_DIR, `${req.params.id}.zip.url`), () => {});
-    // Архив лежит ещё и в S3 (см. uploadOfflineZip) — иначе удалённые игры
-    // копили бы там по гигабайту каждая.
-    if (s3Enabled) s3Delete(offlineZipKey(req.params.id));
-    forgetZipJob(req.params.id);
+    db.prepare('DELETE FROM saved_games WHERE id = ? AND owner = ?').run(req.params.id, req.user.owner);
     res.json({ ok: true });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+/* Игра для работы без интернета: снимок раскладки плюс временные ссылки на
+   аудио и обложки. Страница игры скачивает всё это себе в браузер
+   (offline-store.js), дальше сервер не нужен. */
+app.get('/api/saved-games/:id/offline', requirePlayer, async (req, res) => {
+  try {
+    const row = ownGame(req, req.params.id);
+    if (!row) return res.status(404).json({ error: 'Игра не найдена' });
+    const data = JSON.parse(row.data);
+    const tracks = {};
+    for (const [id, t] of Object.entries(data.tracks || {})) {
+      tracks[id] = {
+        id, title: t.title, artist: t.artist, album: t.album, hook: t.hook, lines: t.lines || [],
+        audioKey: t.audioKey || null, photoKey: t.photoKey || null, audioType: t.audioType || null,
+        audioUrl: await s3Url(t.audioKey), photoUrl: await s3Url(t.photoKey),
+      };
+    }
+    res.json({ id: row.id, name: row.name, savedAt: row.createdAt, rounds: data.rounds, tracks });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+/* Запасной путь для того же скачивания — файл через сам сервер. Нужен, пока
+   у хранилища не настроено правило CORS: без него браузер не отдаёт
+   странице байты файла напрямую из хранилища. Путь медленный, поэтому
+   только запасной. Отдаём лишь файлы, которые есть в этой игре. */
+app.get('/api/saved-games/:id/media', requirePlayer, async (req, res) => {
+  try {
+    const row = ownGame(req, req.params.id);
+    if (!row) return res.status(404).json({ error: 'Игра не найдена' });
+    const key = String(req.query.key || '');
+    const inGame = Object.values(JSON.parse(row.data).tracks || {}).some(t => t.audioKey === key || t.photoKey === key);
+    if (!key || !inGame || !s3Enabled) return res.status(404).json({ error: 'Файл не найден' });
+    const obj = await s3.send(new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: key }));
+    res.set('Content-Type', obj.ContentType || 'application/octet-stream');
+    if (obj.ContentLength) res.set('Content-Length', String(obj.ContentLength));
+    obj.Body.pipe(res);
+  } catch (e) {
+    console.error(e);
+    if (!res.headersSent) res.status(500).json({ error: e.message });
+  }
 });
 
 // Имя файла для скачивания. Кириллицу в Content-Disposition кладём через
@@ -399,9 +988,9 @@ function contentDisposition(name, ext) {
    или через ИИ убедиться, что один и тот же трек не попал в два блока —
    правило музлото: за игру трек звучит ровно один раз. Логика сборки текста
    лежит в lib/tracklist.js. */
-app.get('/api/saved-games/:id/tracklist', (req, res) => {
+app.get('/api/saved-games/:id/tracklist', requirePlayer, (req, res) => {
   try {
-    const row = db.prepare('SELECT * FROM saved_games WHERE id = ?').get(req.params.id);
+    const row = ownGame(req, req.params.id);
     if (!row) return res.status(404).json({ error: 'Игра не найдена' });
     const text = buildTrackListText(row);
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -420,9 +1009,9 @@ app.get('/api/saved-games/:id/tracklist', (req, res) => {
    реально прозвучит. На каждого участника — по бланку на каждый блок
    (обычно три листа за игру). Страницы идут по блокам: сначала весь первый
    блок, потом второй, потом третий. Отрисовка — в lib/blanks-pdf.js. */
-app.get('/api/saved-games/:id/blanks.pdf', async (req, res) => {
+app.get('/api/saved-games/:id/blanks.pdf', requirePlayer, async (req, res) => {
   try {
-    const row = db.prepare('SELECT * FROM saved_games WHERE id = ?').get(req.params.id);
+    const row = ownGame(req, req.params.id);
     if (!row) return res.status(404).json({ error: 'Игра не найдена' });
 
     const players = Math.max(1, Math.min(MAX_PLAYERS, parseInt(req.query.players, 10) || 1));
@@ -445,104 +1034,7 @@ app.get('/api/saved-games/:id/blanks.pdf', async (req, res) => {
   }
 });
 
-/* ============ ОФФЛАЙН-АРХИВ СОХРАНЁННОЙ ИГРЫ ============
-   ZIP с автономной версией игры: HTML-плеер без сети (сетка чисел, розыгрыш,
-   караоке, бланки — без редактора банка) плюс аудио и обложки рядом файлами.
-
-   Сборка вынесена в lib/offline-zip.js и идёт ФОНОМ, а не внутри HTTP-запроса.
-   Раньше клиент висел на одном длинном запросе всё время сборки, не получая
-   ни байта: на игре в 90 треков это минуты молчания, которые обратный прокси
-   разрывает — и «Готовим архив…» оставалось на экране навсегда, потому что
-   ответа уже никто не пришлёт. Теперь клиент коротко спрашивает статус, а
-   готовый архив скачивает отдельным быстрым запросом с точным Content-Length.
-   Подробный разбор второй, более коварной причины зависания (очередь
-   архиватора против пула сокетов S3) — в шапке lib/offline-zip.js. */
-const OFFLINE_TEMPLATE_PATH = path.join(__dirname, 'public', 'offline-template.html');
-
-/* Выгрузка готового архива в S3 многочастной загрузкой: почти гигабайтный
-   файл одним PUT слать не стоит — любой обрыв означал бы начинать сначала,
-   а тут части повторяются по отдельности. Заодно получаем прогресс, чтобы
-   пользователь видел, что происходит, а не смотрел в застывшую надпись. */
-async function uploadOfflineZip(filePath, key, onProgress) {
-  const up = new Upload({
-    client: s3,
-    params: {
-      Bucket: process.env.S3_BUCKET, Key: key,
-      Body: fs.createReadStream(filePath),
-      ContentType: 'application/zip', ACL: 'public-read',
-    },
-    partSize: 16 * 1024 * 1024,
-    queueSize: 3,
-  });
-  up.on('httpUploadProgress', p => onProgress(p.loaded || 0));
-  await up.done();
-  return s3PublicUrl(key);
-}
-
-const offlineZipKey = id => `offline-games/${id}.zip`;
-
-function zipCtx(id, row, log) {
-  return {
-    id, row, log,
-    cachePath: path.join(ZIP_CACHE_DIR, `${id}.zip`),
-    templatePath: OFFLINE_TEMPLATE_PATH,
-    s3: s3Enabled ? s3 : null,
-    s3Bucket: process.env.S3_BUCKET,
-    GetObjectCommand,
-    // Готовый архив уезжает в хранилище, и клиент качает его оттуда напрямую.
-    // Канал самого сервера приложения для гигабайтных файлов непригоден —
-    // подробности в комментарии к выгрузке в lib/offline-zip.js.
-    uploadZip: s3Enabled ? uploadOfflineZip : null,
-    zipKey: offlineZipKey(id),
-  };
-}
-
-/* Идемпотентно: запускает сборку, если архива ещё нет, и в любом случае
-   возвращает текущее состояние. Клиент дёргает этот же маршрут и для старта,
-   и для опроса прогресса — поэтому после перезапуска сервера не бывает
-   ситуации «опрашиваем сборку, которую никто не запускал». */
-app.post('/api/saved-games/:id/prepare', (req, res) => {
-  const t0 = Date.now();
-  const log = (...a) => console.log(`[zip ${req.params.id} +${Date.now() - t0}ms]`, ...a);
-  try {
-    const row = db.prepare('SELECT * FROM saved_games WHERE id = ?').get(req.params.id);
-    if (!row) return res.status(404).json({ error: 'Игра не найдена' });
-    // retry:true приходит только с первого нажатия «Скачать игру» — повтор
-    // упавшей сборки должен быть осознанным действием, а не побочным
-    // эффектом опроса прогресса.
-    res.json(ensureZipBuild(zipCtx(req.params.id, row, log), { retry: !!(req.body || {}).retry }));
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
-});
-
-// Отдаёт уже собранный архив: быстро и с точным Content-Length, чтобы браузер
-// показал честный процент скачивания. Саму сборку этот маршрут не запускает —
-// за неё отвечает /prepare выше.
-app.get('/api/saved-games/:id/download', (req, res) => {
-  try {
-    const row = db.prepare('SELECT * FROM saved_games WHERE id = ?').get(req.params.id);
-    if (!row) return res.status(404).json({ error: 'Игра не найдена' });
-
-    const cachePath = path.join(ZIP_CACHE_DIR, `${req.params.id}.zip`);
-    if (!fs.existsSync(cachePath)) {
-      // 409, а не 404: игра существует, просто архив ещё не собран. Клиент по
-      // этому коду понимает, что надо сначала вызвать /prepare.
-      return res.status(409).json({ error: 'Архив ещё не собран', hint: 'prepare' });
-    }
-
-    const size = fs.statSync(cachePath).size;
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', contentDisposition(row.name, 'zip'));
-    res.setHeader('Content-Length', size);
-    const stream = fs.createReadStream(cachePath);
-    stream.on('error', e => {
-      console.error('[download] ошибка чтения архива:', e.message);
-      if (!res.headersSent) res.status(500).end();
-    });
-    stream.pipe(res);
-  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/transcribe', requireAuth, (req, res) => {
+app.post('/api/transcribe', requireAdmin, (req, res) => {
   upload.single('audio')(req, res, async (uploadErr) => {
     if (uploadErr) {
       // Ошибки multer (например, превышен лимит размера) не должны улетать
@@ -669,7 +1161,7 @@ function runYandexScript(mode, query) {
 
 // Поиск трека: возвращает варианты с названием, исполнителем, альбомом и обложкой.
 // Сначала Spotify, при неудаче — Яндекс.Музыка как запасной источник.
-app.get('/api/search-track', requireAuth, async (req, res) => {
+app.get('/api/search-track', requireAdmin, async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
 
@@ -709,7 +1201,7 @@ app.get('/api/search-track', requireAuth, async (req, res) => {
 
 // Прокси для обложки: скачиваем на сервере, чтобы не упираться в CORS в браузере.
 // Разрешены обложки Spotify и Яндекс.Музыки.
-app.get('/api/cover-proxy', requireAuth, async (req, res) => {
+app.get('/api/cover-proxy', requireAdmin, async (req, res) => {
   try {
     const url = req.query.url || '';
     if (!/^https:\/\/(i\.scdn\.co|avatars\.yandex\.net)\//.test(url)) {
@@ -935,7 +1427,7 @@ async function trySearchWeb(artist, title) {
 // случае — веб-поиск (включая точный разбор Genius-страниц, если найдутся) и,
 // напоследок, Genius по официальному API (если когда-нибудь будет токен).
 // Если ни один источник не нашёл — фронт оставит поле пустым, текст впишется вручную.
-app.get('/api/lyrics', requireAuth, async (req, res) => {
+app.get('/api/lyrics', requireAdmin, async (req, res) => {
   const artist = (req.query.artist || '').trim();
   const title = (req.query.title || '').trim();
   if (!artist || !title) return res.status(400).json({ error: 'Нужны artist и title' });
@@ -997,7 +1489,7 @@ app.get('/api/lyrics', requireAuth, async (req, res) => {
 // длительность, превью — чтобы можно было выбрать нужную версию вручную,
 // а не слепо качать первый результат (который может оказаться кавером
 // или записью с концерта).
-app.get('/api/search-youtube', requireAuth, async (req, res) => {
+app.get('/api/search-youtube', requireAdmin, async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
 
@@ -1088,7 +1580,7 @@ function spawnYtDlpTracked(args) {
   return { proc, promise };
 }
 
-app.get('/api/fetch-audio', requireAuth, async (req, res) => {
+app.get('/api/fetch-audio', requireAdmin, async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
 
@@ -1198,15 +1690,37 @@ app.get('/api/fetch-audio', requireAuth, async (req, res) => {
   }
 });
 
-// Три отдельных страницы вместо одного index.html: игра / настройка раунда /
-// банк треков (за паролём). Явные маршруты нужны, чтобы работали чистые URL
-// без .html — сами страницы ссылаются друг на друга именно так (location.href
-// = '/', '/setup', '/bank').
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'game.html')));
-app.get('/setup', (req, res) => res.sendFile(path.join(__dirname, 'public', 'setup.html')));
-app.get('/bank', (req, res) => res.sendFile(path.join(__dirname, 'public', 'bank.html')));
+/* ==========================================================================
+   Страницы. Игра и настройка раунда — только после входа (администратор
+   или ведущий с действующим сроком), банк треков и ведущие — только
+   администратору. Страница /offline открывается без сервера вообще: её
+   отдаёт браузеру сервис-воркер (public/sw.js), а пускать ли в игру, она
+   решает сама по лицензии.
+   ========================================================================== */
+const sendPage = (res, file) => res.sendFile(path.join(__dirname, 'public', file));
+function playerPage(file) {
+  return (req, res) => {
+    const u = currentUser(req);
+    if (!u) return res.redirect('/login?next=' + encodeURIComponent(req.path));
+    if (u.role === 'host' && !u.active) return res.redirect('/login?expired=1');
+    sendPage(res, file);
+  };
+}
+app.get('/', playerPage('game.html'));
+app.get('/setup', playerPage('setup.html'));
+app.get('/bank', (req, res) => sendPage(res, 'bank.html'));
+app.get('/admin', (req, res) => {
+  const u = currentUser(req);
+  if (!u || u.role !== 'admin') return res.redirect('/login?next=/admin');
+  sendPage(res, 'admin.html');
+});
+app.get('/login', (req, res) => sendPage(res, 'login.html'));
+app.get('/offline', (req, res) => {
+  res.set('Cache-Control', 'no-cache');
+  sendPage(res, 'offline.html');
+});
 
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Сервер запущен на порту ${PORT}`));
