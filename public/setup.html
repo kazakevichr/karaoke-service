@@ -79,7 +79,10 @@
 <div class="modal" id="picker">
   <div class="mbox">
     <h3 id="pickTitle">Трек на число</h3>
-    <input type="text" id="pickSearch" placeholder="Поиск по названию или исполнителю">
+    <div class="row">
+      <select id="pickCat" style="width:200px"></select>
+      <input type="text" id="pickSearch" placeholder="Поиск по названию или исполнителю" style="flex:1;min-width:200px">
+    </div>
     <div class="mlist" id="pickList"></div>
     <div class="row" style="margin:0">
       <button class="gh" id="pickClear">Убрать трек с числа</button>
@@ -198,16 +201,27 @@ $('btnToBank').onclick = () => { location.href='/bank'; };
 $('btnToGame').onclick = () => { location.href='/'; };
 
 /* ========== ВЫБОР ТРЕКА НА ЧИСЛО ========== */
+/* Весь банк — сотни треков, листать его ради одной замены неудобно. Поэтому
+   список сразу сужен до категории раунда, а выбор категории можно сменить
+   или снять («Все категории»). */
 function openPicker(n){
   pickNumber=n;
   $('pickTitle').textContent=`Какой трек ставим на число ${n}?`;
+  const sel=$('pickCat');
+  sel.innerHTML='<option value="">Все категории</option>'+settings.categories.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+  const cat=activeRound().category;
+  sel.value = settings.categories.includes(cat) ? cat : '';
   $('pickSearch').value=''; renderPick(); $('picker').classList.add('on'); $('pickSearch').focus();
 }
 function renderPick(){
   const q=$('pickSearch').value.toLowerCase().trim();
+  const cat=$('pickCat').value;
   const box=$('pickList'); box.innerHTML='';
-  const list=bank.filter(t=>!q || (t.title||'').toLowerCase().includes(q) || (t.artist||'').toLowerCase().includes(q));
-  if(!list.length) box.innerHTML='<div style="color:#4a4868;padding:12px">В банке нет подходящих треков. Добавьте их в разделе «Банк треков».</div>';
+  const list=(cat ? tracksInCategory(bank, cat) : bank)
+    .filter(t=>!q || (t.title||'').toLowerCase().includes(q) || (t.artist||'').toLowerCase().includes(q));
+  if(!list.length) box.innerHTML = cat
+    ? `<div style="color:#4a4868;padding:12px">В категории «${escapeHtml(cat)}» таких треков нет — выберите «Все категории».</div>`
+    : '<div style="color:#4a4868;padding:12px">В банке нет подходящих треков. Добавьте их в разделе «Банк треков».</div>';
   list.forEach(t=>{
     const where=roundsContaining(settings.rounds, t.id);
     const d=document.createElement('div'); d.className='mrow';
@@ -218,6 +232,7 @@ function renderPick(){
   });
 }
 $('pickSearch').oninput=renderPick;
+$('pickCat').onchange=renderPick;
 $('pickClear').onclick=()=>{ delete activeRound().map[pickNumber]; apiSaveSettings(settings); $('picker').classList.remove('on'); renderGrid(); renderRoundTabs(); };
 $('pickClose').onclick=()=>$('picker').classList.remove('on');
 

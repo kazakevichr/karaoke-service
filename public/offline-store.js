@@ -126,6 +126,11 @@ const MBOffline = (() => {
   }
 
   /* ---------- Игры ---------- */
+  // То, чем страница /offline собирает PDF бланков (см. lib/blanks-core.js).
+  const BLANKS_ASSETS = ['/blanks-core.js', '/vendor/pdfkit.js', '/vendor/qrcode.js', '/fonts/DejaVuSans.ttf', '/fonts/DejaVuSans-Bold.ttf'];
+  // Всё для бланков без интернета — заранее, пока сеть есть: сервис-воркер
+  // кладёт эти файлы в кэш по дороге.
+  const prefetchBlanksAssets = () => Promise.all(BLANKS_ASSETS.map(u => fetch(u).catch(() => {})));
   async function fetchBlob(url) {
     const r = await fetch(url);
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -203,8 +208,10 @@ const MBOffline = (() => {
     });
     await put('games', {
       id: g.id, name: g.name, savedAt: g.savedAt, rounds: g.rounds, tracks,
+      blanksDesign: g.blanksDesign || null,
       owner: payload.sub, storedAt: Date.now(), failed: progress.failed,
     });
+    await prefetchBlanksAssets();
     return progress;
   }
 
@@ -232,6 +239,6 @@ const MBOffline = (() => {
 
   return {
     deviceId, refreshLicense, checkLicense, touchClock,
-    saveGame, listGames, getGame, getMedia, deleteGame, wipe,
+    saveGame, listGames, getGame, getMedia, deleteGame, wipe, prefetchBlanksAssets,
   };
 })();

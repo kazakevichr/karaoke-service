@@ -18,7 +18,7 @@ const {
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { buildTrackListText } = require('./lib/tracklist');
-const { streamBlanksPdf, MAX_PLAYERS } = require('./lib/blanks-pdf');
+const { streamBlanksPdf, MAX_PLAYERS, FONT_REG, FONT_BOLD } = require('./lib/blanks-pdf');
 
 const app = express();
 // Сервис стоит за обратным прокси Coolify: без этого req.ip — адрес прокси
@@ -934,7 +934,10 @@ app.get('/api/saved-games/:id/offline', requirePlayer, async (req, res) => {
         audioUrl: await s3Url(t.audioKey), photoUrl: await s3Url(t.photoKey),
       };
     }
-    res.json({ id: row.id, name: row.name, savedAt: row.createdAt, rounds: data.rounds, tracks });
+    // Оформление бланков (заголовок, номинация, ссылка для QR) — чтобы без
+    // интернета бланки печатались такими же, как ведущий настроил на сайте.
+    const blanksDesign = (loadOwnerSettings(req.user) || {}).blanksDesign || null;
+    res.json({ id: row.id, name: row.name, savedAt: row.createdAt, rounds: data.rounds, tracks, blanksDesign });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
@@ -1008,7 +1011,7 @@ app.get('/api/saved-games/:id/tracklist', requirePlayer, (req, res) => {
    поэтому бланки собираются сами и гарантированно совпадают с тем, что
    реально прозвучит. На каждого участника — по бланку на каждый блок
    (обычно три листа за игру). Страницы идут по блокам: сначала весь первый
-   блок, потом второй, потом третий. Отрисовка — в lib/blanks-pdf.js. */
+   блок, потом второй, потом третий. Отрисовка — в lib/blanks-core.js. */
 app.get('/api/saved-games/:id/blanks.pdf', requirePlayer, async (req, res) => {
   try {
     const row = ownGame(req, req.params.id);
@@ -1719,6 +1722,18 @@ app.get('/offline', (req, res) => {
   res.set('Cache-Control', 'no-cache');
   sendPage(res, 'offline.html');
 });
+
+/* Всё, чем страница /offline собирает бланки без интернета: та же вёрстка,
+   что на сервере, браузерная сборка pdfkit, генератор QR и шрифты. Берём
+   прямо из npm-пакетов, копий в public не держим. */
+const OFFLINE_ASSETS = {
+  '/blanks-core.js': path.join(__dirname, 'lib', 'blanks-core.js'),
+  '/vendor/pdfkit.js': path.join(path.dirname(require.resolve('pdfkit')), 'pdfkit.standalone.js'),
+  '/vendor/qrcode.js': require.resolve('qrcode-generator'),
+  '/fonts/DejaVuSans.ttf': FONT_REG,
+  '/fonts/DejaVuSans-Bold.ttf': FONT_BOLD,
+};
+Object.entries(OFFLINE_ASSETS).forEach(([url, file]) => app.get(url, (req, res) => res.sendFile(file)));
 
 app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 

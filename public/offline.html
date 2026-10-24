@@ -219,25 +219,33 @@
 <!-- ============ БЛАНКИ ДЛЯ УЧАСТНИКОВ ============ -->
 <div class="sync" id="blanksView">
   <h3>Бланки для участников</h3>
-  <p>Как в лото: каждому игроку — свой уникальный бланк из треков, которые
-     реально расставлены в текущем раунде. Открывается отдельная страница для
-     печати — по одному бланку на лист.</p>
-  <div class="row" style="margin:0 0 6px">
-    <span class="status" id="blanksPoolInfo"></span>
-  </div>
+  <p>Те же бланки, что на сайте: каждый участник получает по бланку на каждый раунд, треки на бланках
+     перемешаны. На выходе — готовый PDF, страницы идут по раундам: сначала весь первый, потом второй,
+     потом третий. Для той же игры и того же числа участников листы получаются те же, что онлайн.</p>
   <div class="row">
-    <div class="fld"><label class="f">Игроков (бланков)</label><input type="number" id="bnCount" min="1" max="200" value="20" style="width:100px"></div>
-    <div class="fld"><label class="f">Заголовок</label><input type="text" id="bnTitle" style="width:280px"></div>
+    <div class="fld"><label class="f">Участников</label>
+      <input type="number" id="bnCount" min="1" max="300" value="20" style="width:110px"></div>
+    <div class="fld" style="flex:1"><label class="f">&nbsp;</label>
+      <span class="status" id="blanksPoolInfo"></span></div>
   </div>
-  <div class="row">
-    <div class="fld full"><label class="f">Текст раунда</label><input type="text" id="bnRoundLabel" class="full"></div>
-  </div>
-  <div class="row">
-    <div class="fld"><label class="f">Номинация (необязательно)</label><input type="text" id="bnNomination" style="width:340px" placeholder="например: Самый активный и весёлый столик"></div>
-    <div class="fld"><label class="f">Подпись</label><input type="text" id="bnTagline" style="width:220px"></div>
-  </div>
+  <details style="margin:10px 0 4px">
+    <summary style="cursor:pointer;color:#8a87b8;font-size:13px;user-select:none">Оформление бланка (заголовок, номинация, QR)</summary>
+    <div style="padding-top:10px">
+      <div class="row">
+        <div class="fld"><label class="f">Заголовок</label><input type="text" id="bnTitle" style="width:280px"></div>
+        <div class="fld"><label class="f">Подпись внизу</label><input type="text" id="bnTagline" style="width:220px"></div>
+      </div>
+      <div class="row">
+        <div class="fld full"><label class="f">Номинация (необязательно)</label><input type="text" id="bnNomination" class="full" placeholder="например: Самый активный и весёлый столик"></div>
+      </div>
+      <div class="row">
+        <div class="fld full"><label class="f">Ссылка для QR-кода (необязательно — соцсеть, Telegram и т.д.)</label><input type="text" id="bnQrUrl" class="full" placeholder="https://..."></div>
+      </div>
+      <p style="font-size:12px;color:#4a4868;margin:2px 0 0">Строка «N раунд: Собери комбинацию…» подставляется автоматически по номеру раунда.</p>
+    </div>
+  </details>
   <div class="sync-actions">
-    <button id="btnBlanksGenerate">Сгенерировать и открыть</button>
+    <button id="btnBlanksPdf">Скачать PDF бланков</button>
     <span class="status" id="blanksStatus"></span>
     <div style="flex:1"></div>
     <button class="gh" id="btnBlanksClose">Закрыть</button>
@@ -302,6 +310,10 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
     showLicense(`${escapeHtml(p.name || '')}${p.name ? ' · ' : ''}без интернета можно играть до ${fmtWhen(p.offlineUntil)}`
       + (p.accessUntil ? `<small>Доступ открыт до ${new Date(p.accessUntil).toLocaleDateString('ru', MSK)} включительно. ${note}</small>` : (note ? `<small>${note}</small>` : '')));
     setInterval(() => MBOffline.touchClock().catch(() => {}), 60 * 1000);
+    // Пока связь есть — подтягиваем в кэш всё для бланков без интернета.
+    // Нужно тем, кто сохранил игру до того, как бланки научились
+    // собираться здесь: сохранение теперь делает это само.
+    if (net.status === 'ok') MBOffline.prefetchBlanksAssets();
 
     const games = (await MBOffline.listGames()).filter(g => g.owner === p.sub);
     const wanted = new URLSearchParams(location.search).get('game');
@@ -347,7 +359,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
       const photo = t.photoKey ? await MBOffline.getMedia(t.photoKey) : null;
       tracks[t.id] = { ...t, audioFile: audio ? URL.createObjectURL(audio) : null, photoFile: photo ? URL.createObjectURL(photo) : null };
     }
-    startGame({ name: g.name, savedAt: g.savedAt, rounds: g.rounds, tracks });
+    startGame({ id: g.id, name: g.name, savedAt: g.savedAt, rounds: g.rounds, tracks, blanksDesign: g.blanksDesign });
   }
 
   init().catch(e => {
@@ -577,109 +589,102 @@ function startGame(GAME){
   audio.addEventListener('ended', ()=>$('btnPlay').textContent='▶');
   window.addEventListener('resize', ()=>positionTrack(lastActive<0?0:lastActive));
 
-  /* ========== БЛАНКИ ДЛЯ УЧАСТНИКОВ (без QR — он был для онлайн-проверки) ========== */
-  function trackLabel(id){
-    const t=trackById(id);
-    if(!t) return '—';
-    const parts=[]; if(t.artist) parts.push(t.artist); parts.push(t.title||'Без названия');
-    return parts.join(' - ');
+  /* ========== БЛАНКИ ДЛЯ УЧАСТНИКОВ ==========
+     Тот же PDF, что на сайте: вёрстку рисует общий с сервером
+     /blanks-core.js браузерной сборкой pdfkit, QR строится здесь же, без
+     интернета. Раскладка берётся текущая: без «Перетасовать» бланки
+     совпадают с онлайновыми лист в лист, а после перетасовки собираются по
+     новой раскладке — так напечатанное совпадёт с тем, что прозвучит.
+     Оформление по умолчанию — то, что ведущий настроил на сайте; правки
+     здесь запоминаются для этой игры. */
+  const designKey = 'mb_blanks_design:' + GAME.id;
+  function blanksDesign(){
+    let local = null;
+    try { local = JSON.parse(localStorage.getItem(designKey) || 'null'); } catch(e) {}
+    return Object.assign({ title:'МУЗЫКАЛЬНОЕ ЛОТО', tagline:'Давайте общаться!', nomination:'', qrUrl:'' }, GAME.blanksDesign || {}, local || {});
   }
-  function blankPoolIds(roundIdx){
-    return [...new Set(Object.values(rounds[roundIdx].map||{}).filter(Boolean))];
+  const scriptLoads = {};
+  function loadScript(src){
+    if(!scriptLoads[src]) scriptLoads[src] = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => { s.remove(); delete scriptLoads[src]; reject(new Error('не загрузился ' + src)); };
+      document.head.appendChild(s);
+    });
+    return scriptLoads[src];
   }
-  function buildBlankCards(roundIdx, opts){
-    const poolIds=blankPoolIds(roundIdx);
-    if(!poolIds.length) return null;
-    const cols=5;
-    const cellCount=Math.min(25, poolIds.length);
-    const rows=Math.ceil(cellCount/cols);
-    const cards=[];
-    for(let i=0;i<opts.count;i++) cards.push(shuffleArr(poolIds).slice(0,cellCount));
-    return { cols, rows, cellCount, cards, title:opts.title, roundLabel:opts.roundLabel, nomination:opts.nomination, tagline:opts.tagline };
+  async function buildBlanksPdf(players, design){
+    await Promise.all(['/vendor/pdfkit.js', '/vendor/qrcode.js', '/blanks-core.js'].map(loadScript));
+    const fonts = await Promise.all(['/fonts/DejaVuSans.ttf', '/fonts/DejaVuSans-Bold.ttf'].map(async u => {
+      const r = await fetch(u);
+      if(!r.ok) throw new Error('не загрузился шрифт');
+      return r.arrayBuffer();
+    }));
+    const doc = new PDFDocument(MBBlanks.DOC_OPTIONS);
+    doc.registerFont('regular', fonts[0]);
+    doc.registerFont('bold', fonts[1]);
+    const chunks = [];
+    const done = new Promise((resolve, reject) => {
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', resolve);
+      doc.on('error', reject);
+    });
+    MBBlanks.render(doc, { id: GAME.id, name: GAME.name, rounds: rounds.map(r => ({ map: r.map })), tracks }, players, design, window.qrcode);
+    await done;
+    return new Blob(chunks, { type: 'application/pdf' });
   }
-  function renderBlanksDoc(blanks){
-    const cardsHtml=blanks.cards.map(cardIds=>{
-      let rowsHtml='';
-      for(let ri=0; ri<blanks.rows; ri++){
-        let cellsHtml='';
-        for(let ci=0; ci<blanks.cols; ci++){
-          const idx=ri*blanks.cols+ci;
-          cellsHtml += idx<cardIds.length
-            ? `<td>${escapeHtml(trackLabel(cardIds[idx]))}</td>`
-            : `<td class="empty">—</td>`;
-        }
-        rowsHtml += `<tr>${cellsHtml}</tr>`;
-      }
-      return `<div class="card">
-        <h1>${escapeHtml(blanks.title||'МУЗЫКАЛЬНОЕ ЛОТО')}</h1>
-        <table class="grid"><tbody>${rowsHtml}</tbody></table>
-        <div class="footer">
-          ${blanks.roundLabel ? `<div class="line1">${escapeHtml(blanks.roundLabel)}</div>` : ''}
-          ${blanks.nomination ? `<div class="line2">Номинация <i>${escapeHtml(blanks.nomination)}</i></div>` : ''}
-          ${blanks.tagline ? `<div class="line3">${escapeHtml(blanks.tagline)}</div>` : ''}
-        </div>
-      </div>`;
-    }).join('');
-    return `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
-    <title>Бланки — ${escapeHtml(blanks.title||'МУЗЫКАЛЬНОЕ ЛОТО')}</title>
-    <style>
-      @page { size: A4; margin: 12mm; }
-      * { box-sizing:border-box; }
-      body { font-family: Arial, Helvetica, sans-serif; color:#000; background:#fff; margin:0; }
-      .card { page-break-after:always; padding:8mm 4mm; }
-      .card:last-child { page-break-after:auto; }
-      .card h1 { font-size:38px; font-weight:900; text-align:center; letter-spacing:.01em; margin:0 0 16px; }
-      table.grid { width:100%; border-collapse:collapse; table-layout:fixed; }
-      table.grid td { border:2px solid #000; padding:12px 6px; text-align:center; font-weight:700;
-                      font-size:14px; line-height:1.25; vertical-align:middle; height:64px; }
-      table.grid td.empty { color:#ccc; border-color:#999; }
-      .footer { margin-top:18px; }
-      .footer .line1 { font-size:19px; font-weight:800; }
-      .footer .line2 { font-size:17px; font-weight:700; margin-top:6px; }
-      .footer .line2 i { font-weight:600; font-style:italic; }
-      .footer .line3 { font-size:19px; font-weight:800; margin-top:10px; }
-      .toolbar { padding:14px; text-align:center; }
-      .toolbar button { font-size:15px; padding:9px 22px; border-radius:8px; border:0;
-                         background:#ff2e63; color:#fff; font-weight:700; cursor:pointer; }
-      @media print { .toolbar { display:none; } }
-    </style></head><body>
-    <div class="toolbar"><button onclick="window.print()">Печать / Сохранить как PDF</button></div>
-    ${cardsHtml}
-    </body></html>`;
+
+  function updateBlanksInfo(){
+    const players = Math.max(1, Math.min(300, +$('bnCount').value || 1));
+    const sizes = rounds.map((r, i) => ({ i, n: new Set(Object.values(r.map||{}).filter(Boolean)).size })).filter(x => x.n);
+    let msg = `${sizes.length} раунд(ов) · получится ${sizes.length * players} лист(ов): по ${sizes.length} на каждого участника`;
+    // Клеток на бланке всегда 25. Если в раунде треков меньше — часть клеток
+    // будет пустой, и узнать об этом лучше до печати пачки.
+    const small = sizes.filter(x => x.n < 25);
+    if(small.length) msg += '<br><span style="color:#ffb020">Внимание: ' + small.map(x =>
+      `в раунде ${x.i + 1} всего ${x.n} трек(ов) — ${25 - x.n} клеток на бланке останутся пустыми`).join('; ') + '.</span>';
+    say('blanksPoolInfo', msg);
   }
   function openBlanksModal(){
-    const idx=activeRoundIdx;
-    const r=rounds[idx];
-    const poolIds=blankPoolIds(idx);
-    say('blanksPoolInfo', !poolIds.length
-      ? `Раунд ${idx+1}: треки не расставлены.`
-      : `Раунд ${idx+1}${r.category?' · '+r.category:''}: доступно ${poolIds.length} треков для бланка (карточка вместит до ${Math.min(25,poolIds.length)}).`);
-    $('bnCount').value = 20;
-    $('bnTitle').value = 'МУЗЫКАЛЬНОЕ ЛОТО';
-    $('bnRoundLabel').value = `${idx+1} раунд: Собери комбинацию по вертикали или горизонтали`;
-    $('bnNomination').value = '';
-    $('bnTagline').value = 'Давайте общаться!';
+    const d = blanksDesign();
+    $('bnTitle').value = d.title;
+    $('bnTagline').value = d.tagline;
+    $('bnNomination').value = d.nomination;
+    $('bnQrUrl').value = d.qrUrl;
     say('blanksStatus', '');
+    updateBlanksInfo();
     $('blanksView').classList.add('on');
   }
-  $('btnBlanks').onclick=openBlanksModal;
-  $('btnBlanksClose').onclick=()=>$('blanksView').classList.remove('on');
-  $('btnBlanksGenerate').onclick=()=>{
-    const idx=activeRoundIdx;
-    const count=Math.max(1, Math.min(200, +$('bnCount').value||20));
-    const opts={
-      count,
-      title:$('bnTitle').value.trim()||'МУЗЫКАЛЬНОЕ ЛОТО',
-      roundLabel:$('bnRoundLabel').value.trim(),
-      nomination:$('bnNomination').value.trim(),
-      tagline:$('bnTagline').value.trim(),
+  $('btnBlanks').onclick = openBlanksModal;
+  $('btnBlanksClose').onclick = () => $('blanksView').classList.remove('on');
+  $('bnCount').oninput = updateBlanksInfo;
+  $('btnBlanksPdf').onclick = async () => {
+    const players = Math.max(1, Math.min(300, +$('bnCount').value || 1));
+    $('bnCount').value = players;
+    const design = {
+      title: $('bnTitle').value.trim() || 'МУЗЫКАЛЬНОЕ ЛОТО',
+      tagline: $('bnTagline').value.trim(),
+      nomination: $('bnNomination').value.trim(),
+      qrUrl: $('bnQrUrl').value.trim(),
     };
-    const blanks=buildBlankCards(idx, opts);
-    if(!blanks) return say('blanksStatus','В этом раунде нет расставленных треков', true);
-    say('blanksStatus', `Сгенерировано ${blanks.cards.length} бланков ✓`);
-    const win=window.open('', '_blank');
-    if(!win) return say('blanksStatus','Браузер заблокировал открытие окна — разрешите всплывающие окна для этой страницы', true);
-    win.document.open(); win.document.write(renderBlanksDoc(blanks)); win.document.close();
+    try { localStorage.setItem(designKey, JSON.stringify(design)); } catch(e) {}
+    $('btnBlanksPdf').disabled = true;
+    say('blanksStatus', `Собираем PDF на ${players} участник(ов)…`);
+    try{
+      const blob = await buildBlanksPdf(players, design);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${(GAME.name || 'Игра').replace(/[\\/:*?"<>|]/g, '').trim() || 'Игра'} — бланки ${players} уч.pdf`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+      say('blanksStatus', 'PDF сохранён в загрузки');
+    }catch(e){
+      console.error(e);
+      say('blanksStatus', 'Не получилось собрать PDF: ' + e.message + '. Откройте эту страницу один раз при интернете — нужные файлы сохранятся на компьютер.', true);
+    }finally{
+      $('btnBlanksPdf').disabled = false;
+    }
   };
 }
 </script>
