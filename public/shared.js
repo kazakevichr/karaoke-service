@@ -58,6 +58,12 @@ function apiSaveSettings(settings) {
   fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) })
     .catch(e => console.error('Не удалось сохранить настройки на сервере:', e));
 }
+// Новая категория банка. Категории общие для всех и лежат у администратора,
+// поэтому отдельным запросом, а не вместе с раундами (у ведущего они свои).
+function apiAddCategory(name) {
+  fetch('/api/categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) })
+    .catch(e => console.error('Не удалось сохранить категорию на сервере:', e));
+}
 function freshRound() { return { category: '', size: 30, map: {}, played: {}, history: [], blanks: null }; }
 function trackById(bank, id) { return bank.find(t => t.id === id); }
 function tracksInCategory(bank, cat) {

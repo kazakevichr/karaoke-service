@@ -98,8 +98,9 @@ let bank = [];
 let settings = { categories:['Общая'], activeRound:0, rounds:[freshRound(),freshRound(),freshRound()] };
 let assignMode = false, pickNumber = null;
 // Ведущий берёт треки из общего банка как есть: заводить категории и
-// заходить в банк может только администратор.
-let isAdmin = false;
+// заходить в банк может только тот, кто ведёт банк (администратор или
+// ведущий с таким правом).
+let canEditBank = false;
 function say(el,t,err){ const e=$(el); e.innerHTML=t; e.className='status'+(err?' err':''); }
 function activeRound(){ return settings.rounds[settings.activeRound]; }
 function removeFromAllRounds(trackId){
@@ -126,7 +127,7 @@ function renderRoundTabs(){
 }
 function syncRoundControls(){
   const r=activeRound();
-  fillCategorySelect($('rCategory'), isAdmin);
+  fillCategorySelect($('rCategory'), canEditBank);
   if(r.category) $('rCategory').value=r.category;
   $('rSize').value=r.size||30;
 }
@@ -155,7 +156,7 @@ function renderGrid(){
 $('rCategory').onchange=()=>{
   if($('rCategory').value==='__new'){
     const n=prompt('Название новой категории (например: 90-е, Саундтреки)');
-    if(n && !settings.categories.includes(n)){ settings.categories.push(n); settings.categories.sort(); apiSaveSettings(settings); }
+    if(n && !settings.categories.includes(n)){ settings.categories.push(n); settings.categories.sort(); apiSaveSettings(settings); apiAddCategory(n); }
     fillCategorySelect($('rCategory'), true);
     $('rCategory').value = n || activeRound().category || settings.categories[0];
   }
@@ -237,8 +238,9 @@ $('pickClear').onclick=()=>{ delete activeRound().map[pickNumber]; apiSaveSettin
 $('pickClose').onclick=()=>$('picker').classList.remove('on');
 
 (async function init(){
-  isAdmin = (await apiMe()).role === 'admin';
-  $('btnToBank').style.display = isAdmin ? '' : 'none';
+  const me = await apiMe();
+  canEditBank = me.role === 'admin' || !!me.canEditBank;
+  $('btnToBank').style.display = canEditBank ? '' : 'none';
   try{ bank=await apiGetTracks(); }catch(e){ console.error(e); bank=[]; }
   try{
     const loaded=await apiGetSettings();

@@ -121,28 +121,12 @@
   @keyframes sp { to { transform:rotate(360deg); } }
 
   /* ---------- Вход по паролю ---------- */
-  #loginGate { display:flex; align-items:center; justify-content:center; height:100vh; flex-direction:column; gap:16px; }
-  #loginGate .box { background:var(--card); border:1px solid rgba(255,255,255,.12); border-radius:16px;
-                     padding:32px 36px; width:100%; max-width:340px; text-align:center; }
-  #loginGate h1 { font-size:20px; margin:0 0 18px; }
-  #loginGate input { width:100%; margin-bottom:12px; }
-  #loginGate button { width:100%; }
 </style>
 </head>
 <body>
 
-<!-- ============ ВХОД ============ -->
-<div id="loginGate">
-  <div class="box">
-    <h1>Банк треков</h1>
-    <input type="password" id="loginPassword" placeholder="Пароль">
-    <button id="btnLogin">Войти</button>
-    <div class="status err" id="loginStatus" style="margin-top:10px"></div>
-  </div>
-</div>
-
 <!-- ============ БАНК ТРЕКОВ ============ -->
-<div id="bankApp" style="display:none">
+<div id="bankApp">
 <div class="view on" id="vLib">
   <div class="top">
     <div class="fld"><label class="f">Поиск</label><input type="text" id="libSearch" placeholder="название или исполнитель" style="width:240px"></div>
@@ -317,30 +301,11 @@
 
 <script src="/shared.js"></script>
 <script>
-/* ========== Вход по паролю ========== */
-async function checkAuth(){
-  const r = await fetch('/api/auth-check');
-  return r.ok;
-}
-async function showBank(){
-  $('loginGate').style.display='none';
-  $('bankApp').style.display='block';
-  await initBank();
-}
-$('btnLogin').onclick = async () => {
-  const password = $('loginPassword').value;
-  $('loginStatus').textContent='';
-  try{
-    const r = await fetch('/api/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ password }) });
-    const data = await r.json().catch(()=>({}));
-    if(!r.ok) throw new Error(data.error||'Не удалось войти');
-    await showBank();
-  }catch(e){ $('loginStatus').textContent = e.message; }
-};
-$('loginPassword').addEventListener('keydown', e=>{ if(e.code==='Enter') $('btnLogin').click(); });
+/* Вход — общий, на /login: без входа или без права вести банк сервер
+   сюда не пускает. Ведущему с этим правом недоступны только «Ведущие». */
 $('btnLogout').onclick = async () => {
   await fetch('/api/logout', { method:'POST' });
-  location.reload();
+  location.href='/login';
 };
 
 /* ========== Банк треков и настройки ========== */
@@ -527,7 +492,7 @@ function renderEditorCategories(t){
 $('btnAddCategory').onclick=()=>{
   const name=$('eNewCategory').value.trim();
   if(!name) return say('eStatus','Впишите название категории', true);
-  if(!settings.categories.includes(name)){ settings.categories.push(name); settings.categories.sort(); apiSaveSettings(settings); }
+  if(!settings.categories.includes(name)){ settings.categories.push(name); settings.categories.sort(); apiSaveSettings(settings); apiAddCategory(name); }
   const t=ensureEditing(); t.categories=t.categories||[]; if(!t.categories.includes(name)) t.categories.push(name);
   $('eNewCategory').value='';
   renderEditorCategories(t);
@@ -1137,8 +1102,8 @@ async function initBank(){
 }
 
 (async function init(){
-  const authed = await checkAuth();
-  if(authed) await showBank();
+  apiMe().then(me=>{ $('btnToAdmin').style.display = me.role==='admin' ? '' : 'none'; });
+  await initBank();
 })();
 </script>
 </body>

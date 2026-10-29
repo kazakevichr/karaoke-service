@@ -117,6 +117,10 @@ db.exec(`
 if (!db.prepare('PRAGMA table_info(saved_games)').all().some(c => c.name === 'owner')) {
   db.exec("ALTER TABLE saved_games ADD COLUMN owner TEXT NOT NULL DEFAULT 'admin'");
 }
+// Ведущий, которому администратор разрешил вести банк треков.
+if (!db.prepare('PRAGMA table_info(hosts)').all().some(c => c.name === 'canEditBank')) {
+  db.exec('ALTER TABLE hosts ADD COLUMN canEditBank INTEGER NOT NULL DEFAULT 0');
+}
 const getState = key => {
   const row = db.prepare('SELECT value FROM app_state WHERE key = ?').get(key);
   return row ? row.value : null;
@@ -132,7 +136,10 @@ const setState = (key, value) => db.prepare(
    ему банк треков, ведущие и хранилище. Ведущий входит своим логином и
    паролем, которые выдаёт администратор на странице /admin, и работает до
    даты, которую тот поставил. Ведущий собирает свои игры из общего банка и
-   играет в них онлайн или без интернета; сам банк ему не виден.
+   играет в них онлайн или без интернета; сам банк ему не виден — если
+   только администратор не поставил ему галочку «Может вести банк треков».
+   Тогда ведущий добавляет и правит треки наравне с администратором, но
+   ведущие и хранилище остаются только у администратора.
 
    Логин ведущего привязывается к первому браузеру, в котором в него вошли
    (код браузера — случайная строка в его localStorage). Отдать логин
@@ -236,6 +243,20 @@ function requireAdmin(req, res, next) {
   if (u && u.role === 'admin') { req.user = u; return next(); }
   res.status(401).json({ error: 'Нужен вход администратора', code: 'login_required' });
 }
+// Банк треков: администратор или ведущий с правом вести банк, пока у того
+// действует доступ.
+const canEditBank = u => !!u && (u.role === 'admin' || (u.active && !!u.host.canEditBank));
+function requireBank(req, res, next) {
+  const u = currentUser(req);
+  if (!u) return res.status(401).json({ error: 'Нужно войти', code: 'login_required' });
+  if (u.role === 'host') {
+    if (!u.active) return res.status(403).json({ error: accessEndedText(u.host), code: 'access_expired' });
+    if (!u.host.canEditBank) return res.status(403).json({ error: 'Банк треков ведёт администратор', code: 'no_bank_access' });
+    touchHost(u.host);
+  }
+  req.user = u;
+  next();
+}
 // Игра и настройка раунда: администратор или ведущий с действующим сроком.
 function requirePlayer(req, res, next) {
   const u = currentUser(req);
@@ -299,13 +320,13 @@ app.post('/api/logout', (req, res) => {
   res.clearCookie(SESSION_COOKIE);
   res.json({ ok: true });
 });
-app.get('/api/auth-check', requireAdmin, (req, res) => res.json({ ok: true }));
+app.get('/api/auth-check', requireBank, (req, res) => res.json({ ok: true }));
 app.get('/api/me', (req, res) => {
   const u = currentUser(req);
   if (!u) return res.json({ role: null });
   if (u.role === 'admin') return res.json({ role: 'admin', name: u.name });
   res.json({
-    role: 'host', name: u.host.name, active: u.active,
+    role: 'host', name: u.host.name, active: u.active, canEditBank: canEditBank(u),
     accessUntil: u.host.accessUntil, accessUntilText: u.host.accessUntil ? fmtDateMsk(u.host.accessUntil) : '',
   });
 });
@@ -377,6 +398,7 @@ function hostView(h, gamesCount) {
   return {
     id: h.id, name: h.name, login: h.login, enabled: !!h.enabled, active: hostActive(h),
     accessUntil: h.accessUntil, accessUntilText: h.accessUntil ? fmtDateMsk(h.accessUntil) : '',
+    canEditBank: !!h.canEditBank,
     deviceBound: !!h.deviceId, deviceBoundAt: h.deviceBoundAt, lastSeenAt: h.lastSeenAt,
     createdAt: h.createdAt, gamesCount: gamesCount || 0,
   };
@@ -404,8 +426,8 @@ app.post('/api/hosts', requireAdmin, (req, res) => {
   if (db.prepare('SELECT 1 FROM hosts WHERE login = ?').get(login)) return res.status(400).json({ error: 'Такой логин уже есть' });
   const id = 'h' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
   const password = generatePassword();
-  db.prepare(`INSERT INTO hosts (id, name, login, passHash, accessUntil, enabled, createdAt)
-              VALUES (?, ?, ?, ?, ?, 1, ?)`).run(id, name, login, hashPassword(password), accessUntil, Date.now());
+  db.prepare(`INSERT INTO hosts (id, name, login, passHash, accessUntil, enabled, canEditBank, createdAt)
+              VALUES (?, ?, ?, ?, ?, 1, ?, ?)`).run(id, name, login, hashPassword(password), accessUntil, b.canEditBank ? 1 : 0, Date.now());
   res.json({ host: hostView(db.prepare('SELECT * FROM hosts WHERE id = ?').get(id)), password });
 });
 
@@ -426,6 +448,9 @@ app.patch('/api/hosts/:id', requireAdmin, (req, res) => {
     const t = endOfDayMsk(b.accessUntil);
     if (!t) return res.status(400).json({ error: 'Неверная дата' });
     db.prepare('UPDATE hosts SET accessUntil = ? WHERE id = ?').run(t, host.id);
+  }
+  if (b.canEditBank !== undefined) {
+    db.prepare('UPDATE hosts SET canEditBank = ? WHERE id = ?').run(b.canEditBank ? 1 : 0, host.id);
   }
   if (b.enabled !== undefined) {
     db.prepare('UPDATE hosts SET enabled = ? WHERE id = ?').run(b.enabled ? 1 : 0, host.id);
@@ -713,12 +738,13 @@ function loadOwnerSettings(user) {
 /* ---- API: общий банк треков ----
    Ведущему ссылки на аудио и обложки выдаём только для треков из его
    текущих раундов: играть ему нужны только они, а весь банк целиком ему
-   ни к чему. */
+   ни к чему. Исключение — ведущий, который ведёт банк: ему слушать треки
+   в редакторе. */
 app.get('/api/tracks', requirePlayer, async (req, res) => {
   try {
     const rows = db.prepare('SELECT * FROM tracks ORDER BY createdAt DESC').all();
     let withMedia = null;
-    if (req.user.role === 'host') {
+    if (!canEditBank(req.user)) {
       withMedia = new Set();
       (loadOwnerSettings(req.user).rounds || []).forEach(r => Object.values(r.map || {}).forEach(id => { if (id) withMedia.add(id); }));
     }
@@ -726,7 +752,7 @@ app.get('/api/tracks', requirePlayer, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/tracks/:id', requireAdmin, async (req, res) => {
+app.put('/api/tracks/:id', requireBank, async (req, res) => {
   try {
     const id = req.params.id;
     const b = req.body || {};
@@ -751,7 +777,7 @@ app.put('/api/tracks/:id', requireAdmin, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/tracks/:id/audio', requireAdmin, (req, res) => {
+app.post('/api/tracks/:id/audio', requireBank, (req, res) => {
   uploadTrackFile.single('audio')(req, res, async (uploadErr) => {
     if (uploadErr) {
       const code = uploadErr.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
@@ -773,7 +799,7 @@ app.post('/api/tracks/:id/audio', requireAdmin, (req, res) => {
   });
 });
 
-app.post('/api/tracks/:id/photo', requireAdmin, (req, res) => {
+app.post('/api/tracks/:id/photo', requireBank, (req, res) => {
   uploadTrackFile.single('photo')(req, res, async (uploadErr) => {
     if (uploadErr) return res.status(400).json({ error: 'Ошибка загрузки файла: ' + uploadErr.message });
     try {
@@ -797,7 +823,7 @@ app.post('/api/tracks/:id/photo', requireAdmin, (req, res) => {
 // из браузера напрямую на S3 упирается в отсутствие CORS-заголовков у
 // бакета, поэтому байты забираем здесь, на сервере (CORS — чисто браузерное
 // ограничение, серверных запросов оно не касается).
-app.get('/api/tracks/:id/audio-file', requireAdmin, async (req, res) => {
+app.get('/api/tracks/:id/audio-file', requireBank, async (req, res) => {
   try {
     if (!s3Enabled) return res.status(500).json({ error: 'S3 не настроен на сервере' });
     const row = db.prepare('SELECT audioKey, audioType FROM tracks WHERE id = ?').get(req.params.id);
@@ -808,7 +834,7 @@ app.get('/api/tracks/:id/audio-file', requireAdmin, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
-app.delete('/api/tracks/:id', requireAdmin, async (req, res) => {
+app.delete('/api/tracks/:id', requireBank, async (req, res) => {
   try {
     const id = req.params.id;
     const existing = db.prepare('SELECT * FROM tracks WHERE id = ?').get(id);
@@ -818,6 +844,28 @@ app.delete('/api/tracks/:id', requireAdmin, async (req, res) => {
     }
     db.prepare('DELETE FROM tracks WHERE id = ?').run(id);
     res.json({ ok: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+/* Новая категория банка. Отдельным запросом, а не через PUT /api/settings:
+   у ведущего там свои раунды, а категории общие и лежат в документе
+   администратора. Только добавление — переименовывать и удалять
+   категории в интерфейсе негде. */
+app.post('/api/categories', requireBank, (req, res) => {
+  try {
+    const name = String((req.body || {}).name || '').trim();
+    if (!name) return res.status(400).json({ error: 'Пустое название категории' });
+    db.transaction(() => {
+      const s = adminSettings() || { activeRound: 0, rounds: [freshRound(), freshRound(), freshRound()] };
+      s.categories = Array.isArray(s.categories) && s.categories.length ? s.categories : ['Общая'];
+      if (!s.categories.includes(name)) {
+        s.categories.push(name);
+        s.categories.sort();
+        db.prepare('INSERT INTO settings (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data')
+          .run(JSON.stringify(s));
+      }
+    })();
+    res.json({ categories: bankCategories() });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
@@ -1037,7 +1085,7 @@ app.get('/api/saved-games/:id/blanks.pdf', requirePlayer, async (req, res) => {
   }
 });
 
-app.post('/api/transcribe', requireAdmin, (req, res) => {
+app.post('/api/transcribe', requireBank, (req, res) => {
   upload.single('audio')(req, res, async (uploadErr) => {
     if (uploadErr) {
       // Ошибки multer (например, превышен лимит размера) не должны улетать
@@ -1164,7 +1212,7 @@ function runYandexScript(mode, query) {
 
 // Поиск трека: возвращает варианты с названием, исполнителем, альбомом и обложкой.
 // Сначала Spotify, при неудаче — Яндекс.Музыка как запасной источник.
-app.get('/api/search-track', requireAdmin, async (req, res) => {
+app.get('/api/search-track', requireBank, async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
 
@@ -1204,7 +1252,7 @@ app.get('/api/search-track', requireAdmin, async (req, res) => {
 
 // Прокси для обложки: скачиваем на сервере, чтобы не упираться в CORS в браузере.
 // Разрешены обложки Spotify и Яндекс.Музыки.
-app.get('/api/cover-proxy', requireAdmin, async (req, res) => {
+app.get('/api/cover-proxy', requireBank, async (req, res) => {
   try {
     const url = req.query.url || '';
     if (!/^https:\/\/(i\.scdn\.co|avatars\.yandex\.net)\//.test(url)) {
@@ -1430,7 +1478,7 @@ async function trySearchWeb(artist, title) {
 // случае — веб-поиск (включая точный разбор Genius-страниц, если найдутся) и,
 // напоследок, Genius по официальному API (если когда-нибудь будет токен).
 // Если ни один источник не нашёл — фронт оставит поле пустым, текст впишется вручную.
-app.get('/api/lyrics', requireAdmin, async (req, res) => {
+app.get('/api/lyrics', requireBank, async (req, res) => {
   const artist = (req.query.artist || '').trim();
   const title = (req.query.title || '').trim();
   if (!artist || !title) return res.status(400).json({ error: 'Нужны artist и title' });
@@ -1492,7 +1540,7 @@ app.get('/api/lyrics', requireAdmin, async (req, res) => {
 // длительность, превью — чтобы можно было выбрать нужную версию вручную,
 // а не слепо качать первый результат (который может оказаться кавером
 // или записью с концерта).
-app.get('/api/search-youtube', requireAdmin, async (req, res) => {
+app.get('/api/search-youtube', requireBank, async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
 
@@ -1583,7 +1631,7 @@ function spawnYtDlpTracked(args) {
   return { proc, promise };
 }
 
-app.get('/api/fetch-audio', requireAdmin, async (req, res) => {
+app.get('/api/fetch-audio', requireBank, async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Пустой запрос' });
 
@@ -1711,7 +1759,13 @@ function playerPage(file) {
 }
 app.get('/', playerPage('game.html'));
 app.get('/setup', playerPage('setup.html'));
-app.get('/bank', (req, res) => sendPage(res, 'bank.html'));
+app.get('/bank', (req, res) => {
+  const u = currentUser(req);
+  if (!u) return res.redirect('/login?next=/bank');
+  if (u.role === 'host' && !u.active) return res.redirect('/login?expired=1');
+  if (!canEditBank(u)) return res.redirect('/');
+  sendPage(res, 'bank.html');
+});
 app.get('/admin', (req, res) => {
   const u = currentUser(req);
   if (!u || u.role !== 'admin') return res.redirect('/login?next=/admin');

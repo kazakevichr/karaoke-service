@@ -46,6 +46,9 @@
   .pill { font-size:12px; font-weight:700; padding:3px 9px; border-radius:20px; }
   .pill.ok { background:rgba(52,211,153,.15); color:var(--ok); }
   .pill.off { background:rgba(255,46,99,.15); color:var(--accent); }
+  .pill.bank { background:rgba(59,130,246,.18); color:#8fb6ff; }
+  label.check { display:flex; gap:8px; align-items:center; font-size:14px; color:#d8d6f0; cursor:pointer; margin-top:12px; }
+  label.check input { width:16px; height:16px; margin:0; }
   .host .facts { color:var(--past); font-size:13px; line-height:1.5; }
   .host .acts { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
   .host .acts .sep { width:1px; height:22px; background:rgba(255,255,255,.12); margin:0 4px; }
@@ -84,6 +87,7 @@
       </div>
       <button id="btnCreate">Создать</button>
     </div>
+    <label class="check"><input type="checkbox" id="nBank"> Может вести банк треков — добавлять, править и удалять треки и категории</label>
     <div class="msg" id="createMsg"></div>
     <div class="creds" id="creds">
       <pre id="credsText"></pre>
@@ -158,9 +162,9 @@ $('btnCreate').onclick = async () => {
   say('createMsg', '');
   $('btnCreate').disabled = true;
   try {
-    const d = await api('POST', '/api/hosts', { name: $('nName').value, login: $('nLogin').value, accessUntil: $('nUntil').value });
+    const d = await api('POST', '/api/hosts', { name: $('nName').value, login: $('nLogin').value, accessUntil: $('nUntil').value, canEditBank: $('nBank').checked });
     showCreds(d.host, d.password);
-    $('nName').value = ''; $('nLogin').value = ''; loginTouched = false;
+    $('nName').value = ''; $('nLogin').value = ''; $('nBank').checked = false; loginTouched = false;
     loadHosts();
   } catch (e) { say('createMsg', e.message, true); }
   finally { $('btnCreate').disabled = false; }
@@ -184,7 +188,7 @@ function hostRow(h) {
     : h.active ? `<span class="pill ok">Работает до ${escapeHtml(h.accessUntilText)}</span>`
     : `<span class="pill off">Закончился ${escapeHtml(h.accessUntilText)}</span>`;
   el.innerHTML = `
-    <div class="head"><span class="name">${escapeHtml(h.name)}</span><span class="login">логин ${escapeHtml(h.login)}</span>${status}</div>
+    <div class="head"><span class="name">${escapeHtml(h.name)}</span><span class="login">логин ${escapeHtml(h.login)}</span>${status}${h.canEditBank ? '<span class="pill bank">Ведёт банк треков</span>' : ''}</div>
     <div class="facts">
       Компьютер: ${h.deviceBound ? 'привязан ' + ruWhen(h.deviceBoundAt) : 'ещё не входил'} ·
       последний раз на сайте: ${ruWhen(h.lastSeenAt)} · сохранённых игр: ${h.gamesCount}
@@ -199,6 +203,7 @@ function hostRow(h) {
       <span class="sep"></span>
       <button class="gh sm" data-unbind ${h.deviceBound ? '' : 'disabled'}>Отвязать компьютер</button>
       <button class="gh sm" data-pass>Новый пароль</button>
+      <button class="gh sm" data-bank>${h.canEditBank ? 'Забрать банк треков' : 'Дать банк треков'}</button>
       <button class="gh sm" data-toggle>${h.enabled ? 'Отключить' : 'Включить'}</button>
       <button class="gh sm" data-del>Удалить</button>
     </div>
@@ -234,6 +239,10 @@ function hostRow(h) {
   el.querySelector('[data-pass]').onclick = () => {
     if (!confirm(`Выдать ${h.name} новый пароль? Старый перестанет работать сразу.`)) return;
     patch({ resetPassword: true }, () => 'Новый пароль — в карточке выше, отправьте его ведущему');
+  };
+  el.querySelector('[data-bank]').onclick = () => {
+    if (!h.canEditBank && !confirm(`Дать ${h.name} доступ к банку треков? Он сможет добавлять, править и удалять треки и категории — изменения увидят все ведущие. Пока доступ к сайту открыт.`)) return;
+    patch({ canEditBank: !h.canEditBank }, x => x.canEditBank ? 'Теперь ведёт банк треков: кнопка «Банк треков» на странице настройки раунда' : 'Доступ к банку треков забран');
   };
   el.querySelector('[data-toggle]').onclick = () => {
     if (h.enabled && !confirm(`Отключить ${h.name}? На сайт он больше не войдёт, а сохранённые на компьютере игры доработают не дольше трёх дней.`)) return;
